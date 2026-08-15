@@ -326,6 +326,8 @@ table{width:100%;border-collapse:collapse;font-size:13px;}
   .profile-widget{bottom:80px;right:14px;}
   .profile-bubble{width:46px;height:46px;font-size:15px;}
   .profile-card{width:210px;right:-6px;}
+  #topbarSyncBadge{padding:4px 8px;font-size:0;gap:0;}
+  #topbarSyncBadge span{margin:0;}
 }
 ::-webkit-scrollbar{width:8px;height:8px;}
 ::-webkit-scrollbar-thumb{background:var(--line);border-radius:10px;}
@@ -374,6 +376,8 @@ table{width:100%;border-collapse:collapse;font-size:13px;}
       <p class="login-err" id="loginScreenErr">เลือกชื่อและรหัส 4 หลักให้ถูกต้อง</p>
       <button type="button" class="btn btn-primary btn-login" onclick="attemptLoginScreen()"><i class="fa-solid fa-right-to-bracket"></i> เข้าสู่ระบบ</button>
     </form>
+    <div class="login-hint">บัญชีทดลองใช้งาน: เลือก <b>ผู้ดูแลระบบ</b> รหัส <b>1234</b> · เลือก <b>Saint</b> รหัส <b>1234</b> · เลือก <b>Ass.Saint</b> รหัส <b>1234</b><br>หากลืมรหัส กรุณาติดต่อผู้ดูแลระบบ (Admin)</div>
+    <div style="font-size:10.5px;color:#c00;text-align:center;margin-top:10px;opacity:.8;">ถ้ากดปุ่ม "เข้าสู่ระบบ" แล้วไม่มีอะไรเกิดขึ้นเลย (หน้าไม่เปลี่ยน ไม่มีข้อความแจ้งเตือนใดๆ) แปลว่าเบราว์เซอร์นี้ปิดการใช้งาน JavaScript ไว้ — กรุณาเปิดไฟล์นี้ด้วย Chrome หรือ Edge เวอร์ชันล่าสุดแทน</div>
     <div style="text-align:center;margin-top:14px;">
       <a href="javascript:void(0)" id="signupLink" onclick="openSignupModal()" style="font-size:12.5px;color:var(--gold);text-decoration:underline;font-weight:600;">ยังไม่มีบัญชี? สมัครใช้งานที่นี่</a>
     </div>
@@ -397,6 +401,7 @@ table{width:100%;border-collapse:collapse;font-size:13px;}
   <main class="main">
     <div class="topbar">
       <button class="menu-btn" id="menuBtn"><i class="fa-solid fa-bars"></i></button>
+      <span id="topbarSyncBadge" onclick="STATE.page='settings';render();" title="สถานะการซิงค์ข้อมูลกับผู้ใช้งานเครื่องอื่น (กดเพื่อไปตั้งค่า)" style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;padding:4px 10px;border-radius:20px;background:var(--glass);border:1px solid var(--line);cursor:pointer;margin-right:auto;color:var(--ink-soft);"></span>
       <div class="topbar-right">
         <div class="role-pill" id="userPill"><i class="fa-solid fa-user-shield"></i>
           <span id="userPillLabel">-</span>
@@ -772,12 +777,12 @@ function saveDB(){
 saveDB();
 
 const DEFAULT_FIREBASE_CONFIG={
-  apiKey: "AIzaSyA_MROgqsJg3nZE_iQjk94hamNZhICAhDE",
-  authDomain: "saint-7f93e.firebaseapp.com",
-  projectId: "saint-7f93e",
-  storageBucket: "saint-7f93e.firebasestorage.app",
-  messagingSenderId: "236285881918",
-  appId: "1:236285881918:web:660a4eb18fdc1715356b6f"
+  apiKey: "AIzaSyCG3oiUzVwFurYZxQLVxqM89km8FSjpwNl",
+  authDomain: "saint-af1b1.firebaseapp.com",
+  projectId: "saint-af1b1",
+  storageBucket: "saint-af1b1.firebasestorage.app",
+  messagingSenderId: "645156430024",
+  appId: "1:645156430024:web:84454ec1c1b4dabec885fd"
 };
 function getFirebaseConfig(){ try{ return JSON.parse(safeStorage.getItem('sm_firebase_config')||'null') || DEFAULT_FIREBASE_CONFIG; }catch(e){ return DEFAULT_FIREBASE_CONFIG; } }
 function setFirebaseConfig(cfg){ safeStorage.setItem('sm_firebase_config', JSON.stringify(cfg)); }
@@ -787,6 +792,17 @@ function fbSetStatus(text, ok){
   fbLastStatus={text, ok};
   const el=document.getElementById('fbStatus');
   if(el) el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:6px;color:${ok===true?'var(--ok)':ok===false?'var(--bad)':'var(--ink-soft)'};">${svgIcon(ok===true?'circle-check':ok===false?'triangle-exclamation':'cloud-arrow-up')} ${text}</span>`;
+  updateTopbarSyncBadge();
+}
+function updateTopbarSyncBadge(){
+  const badge=document.getElementById('topbarSyncBadge');
+  if(!badge) return;
+  const ok = fbLastStatus ? fbLastStatus.ok : null;
+  const color = ok===true ? 'var(--ok)' : ok===false ? 'var(--bad)' : 'var(--ink-soft)';
+  const dotColor = ok===true ? 'var(--ok)' : ok===false ? 'var(--bad)' : '#999';
+  const label = ok===true ? 'ออนไลน์ · ข้อมูลซิงค์กับทุกเครื่อง' : ok===false ? 'ออฟไลน์ — เชื่อมต่อไม่สำเร็จ' : 'กำลังเชื่อมต่อ...';
+  badge.style.color = color;
+  badge.innerHTML = `<span style="width:7px;height:7px;border-radius:50%;background:${dotColor};flex-shrink:0;${ok===true?'box-shadow:0 0 6px '+dotColor+';':''}"></span>${label}`;
 }
 function fbStatusHtml(){
   if(fbLastStatus){
@@ -1011,6 +1027,7 @@ function logActivity(action, detail){
 function showApp(){
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appRoot').style.display='flex';
+  updateTopbarSyncBadge();
 }
 function showLoginScreen(msg, isSuccess){
   document.getElementById('appRoot').style.display='none';
