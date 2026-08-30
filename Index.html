@@ -1627,6 +1627,7 @@ function render(){
   const selEnd = (active && typeof active.selectionEnd==='number') ? active.selectionEnd : null;
   const winScrollY=window.scrollY;
   const scrollBoxTops=Array.from(pages.querySelectorAll('.sheet-wrap, .board-wrap, .folder-grid')).map(el=>el.scrollTop);
+  const scrollBoxLefts=Array.from(pages.querySelectorAll('.sheet-wrap, .board-wrap, .folder-grid')).map(el=>el.scrollLeft);
   let html='';
   switch(STATE.page){
     case 'dashboard': html=pageDashboard(); break;
@@ -1667,7 +1668,10 @@ function render(){
     }
   }
   const newScrollBoxes=pages.querySelectorAll('.sheet-wrap, .board-wrap, .folder-grid');
-  newScrollBoxes.forEach((el,i)=>{ if(scrollBoxTops[i]!=null) el.scrollTop=scrollBoxTops[i]; });
+  newScrollBoxes.forEach((el,i)=>{
+    if(scrollBoxTops[i]!=null) el.scrollTop=scrollBoxTops[i];
+    if(scrollBoxLefts[i]!=null) el.scrollLeft=scrollBoxLefts[i];
+  });
   if(window.scrollY!==winScrollY) window.scrollTo(0, winScrollY);
 }
 
