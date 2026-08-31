@@ -390,6 +390,18 @@ tbody[id^="jobOrderTbody_"] tr.dragover-row td{box-shadow:inset 0 2px 0 var(--go
 .login-card .pw-wrap .pw-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--ink-soft);cursor:pointer;width:32px;height:32px;display:flex;align-items:center;justify-content:center;}
 .login-card .btn-login{width:100%;justify-content:center;margin-top:8px;padding:12px;font-size:14px;}
 .login-err{color:var(--bad);font-size:12.5px;text-align:center;margin:-4px 0 10px;display:none;}
+.login-user-picker{position:relative;}
+.login-user-picker input[type=text]{width:100%;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--white);color:var(--ink);font-family:'Prompt';font-size:14px;outline:none;transition:border-color .15s;}
+.login-user-picker input[type=text]:focus{border-color:var(--royal-l);}
+.login-user-dropdown{position:absolute;left:0;right:0;top:calc(100% + 6px);background:var(--white);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);max-height:220px;overflow-y:auto;z-index:50;display:none;}
+.login-user-dropdown.open{display:block;}
+.login-user-opt{display:flex;align-items:center;gap:10px;padding:9px 12px;cursor:pointer;font-size:13px;color:var(--ink);}
+.login-user-opt:hover{background:var(--sky);}
+.login-user-opt .lu-av{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,var(--gold),var(--royal));display:flex;align-items:center;justify-content:center;color:#fff;font-size:12.5px;font-weight:700;flex-shrink:0;overflow:hidden;}
+.login-user-opt .lu-av img{width:100%;height:100%;object-fit:cover;}
+.login-user-opt .lu-name{font-weight:500;}
+.login-user-opt .lu-role{font-size:11px;color:var(--ink-soft);margin-left:auto;}
+.login-user-empty{padding:10px 12px;font-size:12px;color:var(--ink-soft);}
 .login-hint{font-size:11px;color:var(--ink-soft);text-align:center;margin-top:20px;opacity:.65;line-height:1.6;}
 </style>
 </head>
@@ -421,7 +433,11 @@ tbody[id^="jobOrderTbody_"] tr.dragover-row td{box-shadow:inset 0 2px 0 var(--go
     <h3>เข้าสู่ระบบเพื่อใช้งาน</h3>
     <form id="loginScreenForm">
       <div class="form-row"><label><i class="fa-solid fa-user"></i> เลือกชื่อของคุณ</label>
-        <select id="loginScreenUserSelect" required><option value="">— เลือกชื่อ —</option></select>
+        <div class="login-user-picker">
+          <input type="text" id="loginUserSearchInput" placeholder="พิมพ์ชื่อของคุณ..." autocomplete="off" oninput="filterLoginUserOptions(this.value)" onfocus="filterLoginUserOptions(this.value)" onkeydown="handleLoginUserKeydown(event)">
+          <input type="hidden" id="loginScreenUserSelect" value="">
+          <div class="login-user-dropdown" id="loginUserDropdown"></div>
+        </div>
       </div>
       <div class="form-row"><label><i class="fa-solid fa-lock"></i> รหัส 4 หลัก</label>
         <div class="pw-wrap"><input type="password" id="loginScreenPassword" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="••••" style="letter-spacing:10px;font-size:20px;text-align:center;font-family:monospace;" autocomplete="current-password" required onkeydown="if(event.key==='Enter'){event.preventDefault();attemptLoginScreen();}"><button type="button" class="pw-toggle" onclick="toggleFieldVisibility('loginScreenPassword',this)"><i class="fa-solid fa-eye"></i></button></div>
@@ -694,6 +710,19 @@ function ensureRolePermissions(){
     });
   });
 }
+function ensureUsersSyncedWithEmployees(){
+  if(!DB.users || !DB.employees) return;
+  const empIds = new Set(DB.employees.map(e=>e.id));
+  const seenEmp = new Set();
+  DB.users = DB.users.filter(u=>{
+    if(u.employeeId){
+      if(!empIds.has(u.employeeId)) return false;   // login account left behind after its employee was deleted
+      if(seenEmp.has(u.employeeId)) return false;     // duplicate account linked to the same employee
+      seenEmp.add(u.employeeId);
+    }
+    return true;
+  });
+}
 function canView(pageId, role){
   role = role || STATE.role;
   if(role==='admin') return true;
@@ -826,6 +855,7 @@ if(!DB.users || !DB.users.length){
   if(u && !/^\d{4}$/.test(u.password)) u.password='1234';
 });
 ensureRolePermissions();
+ensureUsersSyncedWithEmployees();
 function saveDB(){
   safeStorage.setItem(DB_KEY, JSON.stringify(DB));
   queueFirebasePush();
@@ -931,6 +961,7 @@ function connectFirebase(cfg, silent){
             if(u && !/^\d{4}$/.test(u.password)) u.password='1234';
           });
           ensureRolePermissions();
+          ensureUsersSyncedWithEmployees();
           safeStorage.setItem(DB_KEY, JSON.stringify(DB));
           fbSetStatus('เชื่อมต่อแล้ว · ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
           fbApplyingRemote=false;
@@ -1080,17 +1111,65 @@ function doLoginById(userId, pin){
   const u = (DB.users||[]).find(x=>x.id===userId);
   return (u && u.password===pin) ? u : null;
 }
-function populateLoginUserSelect(){
-  const sel=document.getElementById('loginScreenUserSelect');
-  if(!sel) return;
-  const roleLabelMap={admin:'Admin',supervisor:'Saint',staff:'Ass.Saint'};
-  const prev = sel.value;
-  sel.innerHTML = '<option value="">— เลือกชื่อ —</option>' + (DB.users||[])
-    .slice()
-    .sort((a,b)=>(a.name||'').localeCompare(b.name||'','th'))
-    .map(u=>`<option value="${u.id}">${u.name} (${roleLabelMap[u.role]||u.role})</option>`).join('');
-  if(prev && (DB.users||[]).find(u=>u.id===prev)) sel.value=prev;
+function resolveUserAvatar(user){
+  if(user.avatar) return user.avatar;
+  if(user.employeeId){
+    const emp=(DB.employees||[]).find(e=>e.id===user.employeeId);
+    if(emp && emp.avatar) return emp.avatar;
+  }
+  return null;
 }
+function populateLoginUserSelect(){
+  const hidden=document.getElementById('loginScreenUserSelect');
+  const textInp=document.getElementById('loginUserSearchInput');
+  if(!hidden || !textInp) return;
+  const prevId=hidden.value;
+  const stillExists=prevId && (DB.users||[]).find(u=>u.id===prevId);
+  if(stillExists){ textInp.value=stillExists.name; }
+  else { hidden.value=''; textInp.value=''; }
+  closeLoginUserDropdown();
+}
+function filterLoginUserOptions(q){
+  const dd=document.getElementById('loginUserDropdown'); if(!dd) return;
+  const roleLabelMap={admin:'Admin',supervisor:'Saint',staff:'Ass.Saint'};
+  const query=(q||'').trim().toLowerCase();
+  const list=(DB.users||[]).slice().sort((a,b)=>(a.name||'').localeCompare(b.name||'','th')).filter(u=>u.name.toLowerCase().includes(query));
+  dd.innerHTML = list.length ? list.map(u=>{
+    const av=resolveUserAvatar(u);
+    const initial=(u.name||'?').trim()[0]||'?';
+    return `<div class="login-user-opt" onclick="selectLoginUser('${u.id}')">
+      <span class="lu-av">${av?`<img src="${av}" onerror="this.parentElement.textContent='${initial}';">`:initial}</span>
+      <span class="lu-name">${u.name}</span>
+      <span class="lu-role">${roleLabelMap[u.role]||u.role}</span>
+    </div>`;
+  }).join('') : '<div class="login-user-empty">ไม่พบชื่อที่ตรงกัน</div>';
+  dd.classList.add('open');
+}
+function selectLoginUser(userId){
+  const u=(DB.users||[]).find(x=>x.id===userId); if(!u) return;
+  document.getElementById('loginScreenUserSelect').value=userId;
+  document.getElementById('loginUserSearchInput').value=u.name;
+  closeLoginUserDropdown();
+  const pf=document.getElementById('loginScreenPassword'); if(pf) pf.focus();
+}
+function closeLoginUserDropdown(){
+  const dd=document.getElementById('loginUserDropdown'); if(dd) dd.classList.remove('open');
+}
+function handleLoginUserKeydown(e){
+  if(e.key==='Enter'){
+    e.preventDefault();
+    const q=e.target.value.trim().toLowerCase();
+    if(!q) return;
+    const match=(DB.users||[]).find(u=>u.name.toLowerCase()===q) || (DB.users||[]).find(u=>u.name.toLowerCase().includes(q));
+    if(match) selectLoginUser(match.id);
+  } else if(e.key==='Escape'){
+    closeLoginUserDropdown();
+  }
+}
+document.addEventListener('click',(e)=>{
+  const wrap=document.querySelector('.login-user-picker');
+  if(wrap && !wrap.contains(e.target)) closeLoginUserDropdown();
+});
 const DISCORD_WEBHOOK_BOARD_URL='https://discord.com/api/webhooks/1540229816756867073/kwvCBYDzj2pXUNGdVAFGYc8qW-fiNYJHydeSh24ciYGjl3_PasVbNxqdenM_g3dV7lVY';
 function notifyDiscordBoardPost(post, isNew){
   if(!DISCORD_WEBHOOK_BOARD_URL) return;
@@ -2752,10 +2831,19 @@ function adjustHoursFormHtml(empId){
     <input type="hidden" name="employeeId" value="${empId}">
     <div class="form-grid">
       <div class="form-row"><label>วันที่</label><input type="date" name="dateKey" value="${todayStr()}" required></div>
-      <div class="form-row"><label>จำนวนชั่วโมง</label><input type="number" step="0.25" name="hours" placeholder="เช่น 2 (เพิ่ม) หรือ -1.5 (หัก)" required></div>
+      <div class="form-row"><label>ประเภท</label>
+        <select name="dir">
+          <option value="add">เพิ่มเวลา</option>
+          <option value="sub">หักเวลา</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-grid">
+      <div class="form-row"><label>ชั่วโมง</label><input type="number" min="0" step="1" name="hours" placeholder="0" value="0" required></div>
+      <div class="form-row"><label>นาที</label><input type="number" min="0" max="59" step="1" name="minutes" placeholder="0" value="0" required></div>
     </div>
     <div class="form-row"><label>หมายเหตุ</label><textarea name="note" rows="2" placeholder="เหตุผลในการปรับชั่วโมง (ไม่บังคับ)"></textarea></div>
-    <p style="font-size:11.5px;color:var(--ink-soft);margin:0;">ใส่ค่าบวกเพื่อเพิ่มชั่วโมง หรือใส่ค่าลบ (เช่น -1.5) เพื่อหักชั่วโมง</p>
+    <p style="font-size:11.5px;color:var(--ink-soft);margin:0;">เลือกเพิ่ม/หักเวลา แล้วใส่จำนวนชั่วโมงและนาทีที่ต้องการ (นาทีสูงสุด 59)</p>
   </form></div>
   <div class="modal-foot"><button class="btn btn-ghost" onclick="closeModal()">ยกเลิก</button><button class="btn btn-primary" id="saveAdjHoursBtn"><i class="fa-solid fa-check"></i> บันทึก</button></div>`;
 }
@@ -2767,13 +2855,18 @@ function openAdjustHoursModal(empId){
     const form=document.getElementById('adjHoursForm');
     if(!form.checkValidity()){ form.reportValidity(); return; }
     const data=Object.fromEntries(new FormData(form).entries());
-    const hoursNum=parseFloat(data.hours);
-    if(isNaN(hoursNum) || hoursNum===0){ toast('กรุณาใส่จำนวนชั่วโมงที่ไม่เป็น 0','err','fa-triangle-exclamation'); return; }
+    const hoursPart=parseInt(data.hours,10)||0;
+    const minutesPart=parseInt(data.minutes,10)||0;
+    if(hoursPart<0 || minutesPart<0 || minutesPart>59){ toast('กรุณาใส่ชั่วโมงและนาทีให้ถูกต้อง (นาที 0-59)','err','fa-triangle-exclamation'); return; }
+    if(hoursPart===0 && minutesPart===0){ toast('กรุณาใส่จำนวนเวลาที่ไม่เป็น 0','err','fa-triangle-exclamation'); return; }
+    const sign = data.dir==='sub' ? -1 : 1;
+    const totalMinutes = sign*(hoursPart*60+minutesPart);
     if(!DB.hourAdjustments) DB.hourAdjustments=[];
-    DB.hourAdjustments.push({id:uid('hadj'), employeeId:data.employeeId, dateKey:data.dateKey, minutes:Math.round(hoursNum*60), note:data.note||'', createdAt:Date.now(), by: STATE.currentUser?STATE.currentUser.name:'Admin'});
+    DB.hourAdjustments.push({id:uid('hadj'), employeeId:data.employeeId, dateKey:data.dateKey, minutes:totalMinutes, note:data.note||'', createdAt:Date.now(), by: STATE.currentUser?STATE.currentUser.name:'Admin'});
     saveDB();
-    logActivity('adjust_hours', (hoursNum>0?'เพิ่ม':'หัก')+' '+Math.abs(hoursNum)+' ชม. ให้ '+emp.name+(data.note?(' — '+data.note):''));
-    toast((hoursNum>0?'เพิ่ม':'หัก')+' '+Math.abs(hoursNum)+' ชม. ให้ '+emp.name+' สำเร็จ','ok','fa-check');
+    const adjLabel=(totalMinutes>0?'เพิ่ม':'หัก')+' '+fmtHours(Math.abs(totalMinutes)*60000)+' ให้ '+emp.name;
+    logActivity('adjust_hours', adjLabel+(data.note?(' — '+data.note):''));
+    toast(adjLabel+' สำเร็จ','ok','fa-check');
     closeModal(); render();
   };
 }
@@ -3367,23 +3460,43 @@ function openEmpModal(empId){
     const data=Object.fromEntries(new FormData(form).entries());
     data.avatar=pendingAvatar;
     data.isAdmin = !!document.querySelector('#empForm [name="isAdmin"]').checked;
-    if(emp){ Object.assign(emp,data); toast('แก้ไขข้อมูล '+emp.name+' สำเร็จ'); }
+    if(emp){
+      Object.assign(emp,data);
+      const linkedUser=(DB.users||[]).find(u=>u.employeeId===emp.id);
+      if(linkedUser){
+        linkedUser.name=data.name;
+        linkedUser.avatar=data.avatar;
+        if(STATE.currentUser && STATE.currentUser.id===linkedUser.id){ STATE.currentUser.name=data.name; STATE.currentUser.avatar=data.avatar; }
+      }
+      toast('แก้ไขข้อมูล '+emp.name+' สำเร็จ');
+    }
     else { data.id=uid('emp'); DB.employees.push(data); DB.attendance[data.id]={}; toast('เพิ่มพนักงาน '+data.name+' สำเร็จ'); }
     saveDB(); closeModal(); render();
+    updateProfileWidget();
   };
 }
 function deleteEmp(empId){
   const emp=DB.employees.find(e=>e.id===empId);
-  confirmDelete('ต้องการลบพนักงาน '+emp.name+' หรือไม่?', ()=>{
+  if(!emp) return;
+  const linkedUser=(DB.users||[]).find(u=>u.employeeId===empId);
+  if(linkedUser && STATE.currentUser && STATE.currentUser.id===linkedUser.id){
+    toast('ไม่สามารถลบพนักงานที่ผูกกับบัญชีที่กำลังใช้งานอยู่ได้','err','fa-triangle-exclamation');
+    return;
+  }
+  confirmDelete('ต้องการลบพนักงาน '+emp.name+' หรือไม่? บัญชีล็อกอินที่ผูกกับพนักงานคนนี้จะถูกลบไปด้วย', ()=>{
     DB.employees=DB.employees.filter(e=>e.id!==empId);
-    saveDB(); toast('ลบพนักงาน '+emp.name+' แล้ว','err','fa-trash'); render();
+    DB.users=(DB.users||[]).filter(u=>u.employeeId!==empId);
+    saveDB(); toast('ลบพนักงาน '+emp.name+' และบัญชีล็อกอินที่เกี่ยวข้องแล้ว','err','fa-trash'); render();
   });
 }
 function deleteAllEmployees(){
   if(!DB.employees.length){ toast('ไม่มีพนักงานให้ลบ','info','fa-circle-xmark'); return; }
-  confirmDelete('ต้องการลบพนักงานทั้งหมด ('+DB.employees.length+' คน) หรือไม่? ประวัติการทำงานและข้อมูลเข้าเวรที่เกี่ยวข้องจะถูกลบไปด้วย', ()=>{
+  confirmDelete('ต้องการลบพนักงานทั้งหมด ('+DB.employees.length+' คน) หรือไม่? ประวัติการทำงาน ข้อมูลเข้าเวร และบัญชีล็อกอินที่เกี่ยวข้องจะถูกลบไปด้วย', ()=>{
+    const myEmpId = STATE.currentUser ? STATE.currentUser.employeeId : null;
     DB.employees=[]; DB.jobEmployees=[]; DB.attendance={};
-    saveDB(); toast('ลบพนักงานทั้งหมดแล้ว','err','fa-trash'); render();
+    DB.users=(DB.users||[]).filter(u=>!u.employeeId);
+    saveDB(); toast('ลบพนักงานทั้งหมดแล้ว','err','fa-trash');
+    if(myEmpId){ logout(); } else { render(); }
   });
 }
 function openEmpHistory(empId){
