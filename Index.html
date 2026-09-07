@@ -407,6 +407,10 @@ tbody[id^="jobOrderTbody_"] tr.dragover-row td{box-shadow:inset 0 2px 0 var(--go
 .login-user-opt .lu-role{font-size:11px;color:var(--ink-soft);margin-left:auto;}
 .login-user-empty{padding:10px 12px;font-size:12px;color:var(--ink-soft);}
 .login-hint{font-size:11px;color:var(--ink-soft);text-align:center;margin-top:20px;opacity:.65;line-height:1.6;}
+#unsyncedBanner{position:fixed;top:0;left:0;right:0;z-index:500;display:none;align-items:center;gap:10px;justify-content:center;flex-wrap:wrap;background:linear-gradient(90deg,#e0524d,#c2413c);color:#fff;padding:9px 16px;font-size:12.5px;font-family:'Prompt';box-shadow:0 4px 14px rgba(0,0,0,.25);}
+#unsyncedBanner button{border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-family:'Prompt';cursor:pointer;}
+#unsyncedBanner .ub-retry{background:#fff;color:#c2413c;font-weight:600;}
+#unsyncedBanner .ub-dismiss{background:rgba(255,255,255,.18);color:#fff;}
 </style>
 </head>
 <body>
@@ -459,6 +463,12 @@ tbody[id^="jobOrderTbody_"] tr.dragover-row td{box-shadow:inset 0 2px 0 var(--go
   </div>
 </div>
 
+<div id="unsyncedBanner">
+  <i class="fa-solid fa-triangle-exclamation"></i>
+  <span>มีข้อมูลบางส่วนยังไม่ได้ซิงค์ขึ้นคลาวด์ (อาจเกิดจากเน็ตหลุดตอนบันทึกล่าสุด) — ข้อมูลยังอยู่ในเครื่องนี้ครบ กรุณาลองซิงค์อีกครั้ง</span>
+  <button class="ub-retry" onclick="retryUnsyncedNow()"><i class="fa-solid fa-rotate"></i> ลองซิงค์อีกครั้ง</button>
+  <button class="ub-dismiss" onclick="dismissUnsyncedBanner()">ซ่อนไว้ก่อน</button>
+</div>
 <div class="app" id="appRoot" style="display:none;">
 
 
@@ -645,7 +655,8 @@ function notifyDiscordJob(job, isNew, assigneeNames){
     toast('แจ้งเตือน Discord ล้มเหลว: '+err.message,'err','fa-triangle-exclamation');
   });
 }
-let fbApp=null, fbDB=null, fbUnsub=null, fbPushTimer=null, fbApplyingRemote=false, fbPendingLocalWrite=false;
+let fbApp=null, fbDB=null, fbUnsub=null, fbPushTimer=null, fbApplyingRemote=false, fbPendingLocalWrite=false, fbInFlightWrites=0;
+let fbMissedRemoteUpdate=false, fbPushRetryCount=0;
 const JOB_TYPES=['บำบัด','ฟาร์ม','เวทมนตร์','ปั๊มเวล','Event','อื่นๆ'];
 function allJobTypes(){
   const set=new Set(JOB_TYPES);
@@ -911,6 +922,46 @@ function fbStatusHtml(){
   }
   return getFirebaseConfig()?'ตั้งค่าไว้แล้ว — กำลังตรวจสอบการเชื่อมต่อ...':'ยังไม่ได้เชื่อมต่อ (ใช้ Local Storage เก็บข้อมูลในเครื่องนี้อยู่)';
 }
+function ensureDbShape(){
+  if(!DB.boardPosts) DB.boardPosts=[];
+  if(!DB.shiftSignups) DB.shiftSignups=[];
+  if(!DB.centralFund) DB.centralFund=[];
+  if(!DB.leaveRecords) DB.leaveRecords=[];
+  if(!DB.jobOrderRowSort) DB.jobOrderRowSort=[];
+  if(!DB.activityLog) DB.activityLog=[];
+  if(!DB.shiftLogs) DB.shiftLogs=[];
+  if(!DB.hourAdjustments) DB.hourAdjustments=[];
+  if(!DB.queue) DB.queue=[];
+  if(!DB.warnings) DB.warnings=[];
+  if(!DB.users || !DB.users.length) DB.users=defaultUsers();
+  ['usr-admin','usr-saint','usr-staff'].forEach(id=>{
+    const u = DB.users.find(x=>x.id===id);
+    if(u && !/^\d{4}$/.test(u.password)) u.password='1234';
+  });
+  ensureRolePermissions();
+  ensureUsersSyncedWithEmployees();
+}
+function saveDBLocal(){
+  safeStorage.setItem(DB_KEY, JSON.stringify(DB));
+}
+function catchUpFromServerIfMissed(){
+  if(!fbMissedRemoteUpdate || !fbDB) return;
+  fbMissedRemoteUpdate=false;
+  fbDB.collection('saintmungo_jms').doc('main').get().then(snap=>{
+    if(!snap.exists || fbPendingLocalWrite || fbInFlightWrites>0) return;
+    const data=snap.data();
+    if(!data || !data.payload) return;
+    const incomingStr=JSON.stringify(data.payload);
+    if(incomingStr===JSON.stringify(DB)) return;
+    fbApplyingRemote=true;
+    DB=data.payload;
+    ensureDbShape();
+    saveDBLocal();
+    fbApplyingRemote=false;
+    if(STATE.currentUser && !DB.users.find(u=>u.id===STATE.currentUser.id)){ logout(); }
+    else { render(); }
+  }).catch(()=>{});
+}
 function connectFirebase(cfg, silent){
   if(typeof firebase==='undefined'){ if(!silent) toast('โหลด Firebase SDK ไม่สำเร็จ ตรวจสอบการเชื่อมต่ออินเทอร์เน็ต','err','fa-triangle-exclamation'); fbSetStatus('โหลด SDK ไม่สำเร็จ', false); return; }
   try{
@@ -948,31 +999,18 @@ function connectFirebase(cfg, silent){
             fbSetStatus('เชื่อมต่อแล้ว · ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
             return;
           }
-          if(fbPendingLocalWrite){
+          if(fbPendingLocalWrite || fbInFlightWrites>0){
             /* เรามีการแก้ไข (เช่นกดเข้า/ออกเวร) ที่ยัง push ขึ้นคลาวด์ไม่เสร็จ — snapshot รอบนี้
                ยังเป็นข้อมูลเก่าก่อนหน้า push ของเรา ถ้าเอามาทับตอนนี้จะทำให้สถานะที่เพิ่งกด
-               "เด้งกลับ" เหมือนไม่ได้กด จึงข้ามรอบนี้ไปก่อน แล้วรอรับ snapshot ถัดไปหลัง push เราสำเร็จ */
+               "เด้งกลับ" เหมือนไม่ได้กด จึงข้ามรอบนี้ไปก่อน แต่จำไว้ว่ามี snapshot ที่ข้ามไป
+               (fbMissedRemoteUpdate) เพื่อไปดึงข้อมูลล่าสุดซ้ำอีกครั้งทันทีที่ push ของเราเสร็จ
+               กันกรณีมีคนอื่นแก้ไขข้อมูลพร้อมกันแล้วเราไม่เคยเห็นการเปลี่ยนแปลงนั้นเลย */
+            fbMissedRemoteUpdate=true;
             return;
           }
           fbApplyingRemote=true;
           DB = data.payload;
-          if(!DB.boardPosts) DB.boardPosts=[];
-          if(!DB.shiftSignups) DB.shiftSignups=[];
-          if(!DB.centralFund) DB.centralFund=[];
-          if(!DB.leaveRecords) DB.leaveRecords=[];
-          if(!DB.jobOrderRowSort) DB.jobOrderRowSort=[];
-          if(!DB.activityLog) DB.activityLog=[];
-          if(!DB.shiftLogs) DB.shiftLogs=[];
-          if(!DB.hourAdjustments) DB.hourAdjustments=[];
-          if(!DB.queue) DB.queue=[];
-          if(!DB.warnings) DB.warnings=[];
-          if(!DB.users || !DB.users.length) DB.users=defaultUsers();
-          ['usr-admin','usr-saint','usr-staff'].forEach(id=>{
-            const u = DB.users.find(x=>x.id===id);
-            if(u && !/^\d{4}$/.test(u.password)) u.password='1234';
-          });
-          ensureRolePermissions();
-          ensureUsersSyncedWithEmployees();
+          ensureDbShape();
           safeStorage.setItem(DB_KEY, JSON.stringify(DB));
           fbSetStatus('เชื่อมต่อแล้ว · ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
           fbApplyingRemote=false;
@@ -1009,18 +1047,319 @@ function disconnectFirebase(){
   fbDB=null;
   fbSetStatus('ยังไม่ได้เชื่อมต่อ', null);
 }
+/* Fields that already have their own scoped merge-transaction (pushShiftChange, pushQueueChange,
+   pushJobChange) must never be blindly overwritten by this generic whole-document push. Otherwise
+   a completely unrelated save from another tab/device (e.g. editing an employee's phone number)
+   can land right after someone's shift/queue/job change and stomp it back out — exactly the same
+   class of bug we already fixed for those three features, just relocated to a different collision
+   point. So this generic push reads the server's current value for those specific fields and keeps
+   them as-is, only writing local DB's value for everything else. */
+const FB_SCOPED_FIELDS=['shiftLogs','attendance','queue','jobs','jobEmployees','boardPosts','centralFund','leaveRecords','warnings'];
+function doFirebasePush(){
+  if(!fbDB || fbApplyingRemote) return;
+  fbPendingLocalWrite=false;
+  fbInFlightWrites++;
+  const docRef = fbDB.collection('saintmungo_jms').doc('main');
+  fbDB.runTransaction(async (transaction)=>{
+    const doc = await transaction.get(docRef);
+    const remotePayload = (doc.exists && doc.data() && doc.data().payload) ? doc.data().payload : null;
+    const merged = JSON.parse(JSON.stringify(DB));
+    if(remotePayload){
+      FB_SCOPED_FIELDS.forEach(f=>{ if(remotePayload[f]!==undefined) merged[f]=remotePayload[f]; });
+    }
+    transaction.set(docRef, {payload: merged, updatedAt: Date.now()});
+    return merged;
+  }).then(merged=>{
+    fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
+    fbPushRetryCount=0;
+    // keep our own copy of the scoped fields in sync with whatever actually ended up on the server
+    FB_SCOPED_FIELDS.forEach(f=>{ if(merged[f]!==undefined) DB[f]=merged[f]; });
+    saveDBLocal();
+    markUnsyncedPending(false);
+    fbSetStatus('ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
+    catchUpFromServerIfMissed();
+  })
+    .catch(err=>{
+      fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
+      fbPushRetryCount++;
+      if(fbPushRetryCount<=8){
+        fbSetStatus('ซิงค์ไม่สำเร็จ กำลังลองใหม่ ('+fbPushRetryCount+')...', false);
+        fbPendingLocalWrite=true;
+        setTimeout(doFirebasePush, Math.min(1000*fbPushRetryCount, 8000));
+      } else {
+        markUnsyncedPending(true);
+        fbSetStatus('ซิงค์ไม่สำเร็จ: '+err.message, false);
+      }
+    });
+}
 function queueFirebasePush(){
   if(!fbDB || fbApplyingRemote) return;
   fbPendingLocalWrite=true;
   clearTimeout(fbPushTimer);
-  fbPushTimer=setTimeout(()=>{
-    try{
-      fbDB.collection('saintmungo_jms').doc('main').set({payload: DB, updatedAt: Date.now()})
-        .then(()=>{ fbPendingLocalWrite=false; })
-        .catch(()=>{ fbPendingLocalWrite=false; });
-      fbSetStatus('ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
-    }catch(err){ fbPendingLocalWrite=false; fbSetStatus('ซิงค์ไม่สำเร็จ: '+err.message, false); }
-  }, 500);
+  fbPushTimer=setTimeout(doFirebasePush, 500);
+}
+/* Merge only this one employee's shift/attendance state into whatever is currently on the
+   server, instead of overwriting the whole document. Two people clocking in/out at the same
+   moment on different devices no longer clobber each other's changes. */
+function mergeEmployeeShiftIntoPayload(remotePayload, empId){
+  const merged = JSON.parse(JSON.stringify(remotePayload));
+  if(!Array.isArray(merged.shiftLogs)) merged.shiftLogs=[];
+  const remoteOthers = merged.shiftLogs.filter(s=>s.employeeId!==empId);
+  const localMine = (DB.shiftLogs||[]).filter(s=>s.employeeId===empId);
+  merged.shiftLogs = remoteOthers.concat(localMine);
+
+  if(!merged.attendance) merged.attendance={};
+  const localAttMine = (DB.attendance && DB.attendance[empId]) ? DB.attendance[empId] : {};
+  merged.attendance = {...merged.attendance, [empId]: {...(merged.attendance[empId]||{}), ...localAttMine}};
+
+  if(Array.isArray(merged.employees)){
+    const localEmp = (DB.employees||[]).find(e=>e.id===empId);
+    if(localEmp) merged.employees = merged.employees.map(e=> e.id===empId ? {...e, status: localEmp.status} : e);
+  }
+  return merged;
+}
+function pushShiftChange(empId, attempt){
+  attempt = attempt || 1;
+  if(!fbDB) return; // ไม่ได้เชื่อมคลาวด์ — บันทึกในเครื่องอย่างเดียวก็พอ
+  fbPendingLocalWrite=true;
+  fbInFlightWrites++;
+  const docRef = fbDB.collection('saintmungo_jms').doc('main');
+  fbDB.runTransaction(async (transaction)=>{
+    const doc = await transaction.get(docRef);
+    const remotePayload = (doc.exists && doc.data() && doc.data().payload) ? doc.data().payload : DB;
+    const merged = mergeEmployeeShiftIntoPayload(remotePayload, empId);
+    transaction.set(docRef, {payload: merged, updatedAt: Date.now()});
+    return merged;
+  }).then(merged=>{
+    fbPendingLocalWrite=false;
+    fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
+    fbPushRetryCount=0;
+    DB.shiftLogs=merged.shiftLogs;
+    DB.attendance=merged.attendance;
+    if(Array.isArray(merged.employees)){
+      merged.employees.forEach(me=>{
+        if(me.id===empId) return;
+        const localE=DB.employees.find(e=>e.id===me.id);
+        if(localE) localE.status=me.status;
+      });
+    }
+    saveDBLocal();
+    markUnsyncedPending(false);
+    fbSetStatus('ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
+    catchUpFromServerIfMissed();
+    render();
+  }).catch(err=>{
+    fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
+    if(attempt<4){ setTimeout(()=>pushShiftChange(empId, attempt+1), 800*attempt); return; }
+    fbPendingLocalWrite=false;
+    markUnsyncedPending(true);
+    fbSetStatus('ซิงค์เข้า/ออกเวรไม่สำเร็จ: '+err.message, false);
+    toast('บันทึกในเครื่องสำเร็จ แต่ซิงค์ขึ้นคลาวด์ไม่สำเร็จ ('+err.message+')','err','fa-triangle-exclamation');
+  });
+}
+/* For rare admin-wide bulk resets (wipe a whole month of attendance, wipe all shift history) that
+   legitimately need to replace shiftLogs/attendance wholesale rather than for one employee at a
+   time — same transaction safety as pushShiftChange, just scoped to "all of it" instead of one
+   employee. Since this still runs as a transaction, it composes safely alongside any in-flight
+   pushShiftChange/doFirebasePush calls: whichever commits second simply sees the first one's
+   already-committed result and only overwrites its own fields on top of that. */
+function pushShiftBulkChange(attempt){
+  attempt = attempt || 1;
+  if(!fbDB) return; // ไม่ได้เชื่อมคลาวด์ — บันทึกในเครื่องอย่างเดียวก็พอ
+  fbPendingLocalWrite=true;
+  fbInFlightWrites++;
+  const docRef = fbDB.collection('saintmungo_jms').doc('main');
+  fbDB.runTransaction(async (transaction)=>{
+    const doc = await transaction.get(docRef);
+    const remotePayload = (doc.exists && doc.data() && doc.data().payload) ? doc.data().payload : DB;
+    const merged = JSON.parse(JSON.stringify(remotePayload));
+    merged.shiftLogs = JSON.parse(JSON.stringify(DB.shiftLogs||[]));
+    merged.attendance = JSON.parse(JSON.stringify(DB.attendance||{}));
+    transaction.set(docRef, {payload: merged, updatedAt: Date.now()});
+    return merged;
+  }).then(merged=>{
+    fbPendingLocalWrite=false;
+    fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
+    fbPushRetryCount=0;
+    DB.shiftLogs=merged.shiftLogs;
+    DB.attendance=merged.attendance;
+    saveDBLocal();
+    markUnsyncedPending(false);
+    fbSetStatus('ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
+    catchUpFromServerIfMissed();
+    render();
+  }).catch(err=>{
+    fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
+    if(attempt<4){ setTimeout(()=>pushShiftBulkChange(attempt+1), 800*attempt); return; }
+    fbPendingLocalWrite=false;
+    markUnsyncedPending(true);
+    fbSetStatus('ซิงค์ไม่สำเร็จ: '+err.message, false);
+    toast('บันทึกในเครื่องสำเร็จ แต่ซิงค์ขึ้นคลาวด์ไม่สำเร็จ ('+err.message+')','err','fa-triangle-exclamation');
+  });
+}
+/* Queue operations (join/leave/advance/clear) are sequential edits to one shared list, so instead
+   of merging by "ownership" like shifts, we re-run the exact same operation against whatever list
+   is actually on the server at commit time. That way two people clicking "เลื่อนคิว" at the same
+   moment always end up applying both moves in some order, instead of one click silently vanishing
+   because it overwrote the other person's change. applyFn receives the server's current queue
+   array and must return the new array (does not mutate the array it's given). */
+function pushQueueChange(applyFn, attempt){
+  attempt = attempt || 1;
+  if(!fbDB) return; // ไม่ได้เชื่อมคลาวด์ — บันทึกในเครื่องอย่างเดียวก็พอ
+  fbPendingLocalWrite=true;
+  fbInFlightWrites++;
+  const docRef = fbDB.collection('saintmungo_jms').doc('main');
+  fbDB.runTransaction(async (transaction)=>{
+    const doc = await transaction.get(docRef);
+    const remotePayload = (doc.exists && doc.data() && doc.data().payload) ? doc.data().payload : DB;
+    const merged = JSON.parse(JSON.stringify(remotePayload));
+    if(!Array.isArray(merged.queue)) merged.queue=[];
+    merged.queue = applyFn(merged.queue) || merged.queue;
+    transaction.set(docRef, {payload: merged, updatedAt: Date.now()});
+    return merged;
+  }).then(merged=>{
+    fbPendingLocalWrite=false;
+    fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
+    fbPushRetryCount=0;
+    DB.queue = merged.queue;
+    saveDBLocal();
+    markUnsyncedPending(false);
+    fbSetStatus('ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
+    catchUpFromServerIfMissed();
+    render();
+  }).catch(err=>{
+    fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
+    if(attempt<4){ setTimeout(()=>pushQueueChange(applyFn, attempt+1), 800*attempt); return; }
+    fbPendingLocalWrite=false;
+    markUnsyncedPending(true);
+    fbSetStatus('ซิงค์คิวไม่สำเร็จ: '+err.message, false);
+    toast('บันทึกในเครื่องสำเร็จ แต่ซิงค์คิวขึ้นคลาวด์ไม่สำเร็จ ('+err.message+')','err','fa-triangle-exclamation');
+  });
+}
+/* Job create/edit/assign/delete/complete only ever touch one job's own record plus its own
+   jobEmployees rows, so we merge scoped to that single jobId — same idea as the shift merge.
+   Everything else on the server (other jobs, other people's assignments, board posts, etc.)
+   is left untouched, so two people accepting/editing different jobs at the same moment can't
+   clobber each other. Pass localJob=null to mean "delete this job" (e.g. deleteJob()).
+   removedBoardPostId is optional: when accepting a job created from a board post, that post
+   needs to be consumed (removed) on the server too, scoped by its own id the same way. */
+function mergeJobIntoPayload(remotePayload, jobId, localJob, localJobEmployeesForJob, removedBoardPostId){
+  const merged = JSON.parse(JSON.stringify(remotePayload));
+  if(!Array.isArray(merged.jobs)) merged.jobs=[];
+  if(localJob){
+    const idx = merged.jobs.findIndex(j=>j.id===jobId);
+    if(idx===-1) merged.jobs.push(localJob); else merged.jobs[idx]=localJob;
+  } else {
+    merged.jobs = merged.jobs.filter(j=>j.id!==jobId);
+  }
+  if(!Array.isArray(merged.jobEmployees)) merged.jobEmployees=[];
+  const others = merged.jobEmployees.filter(je=>je.jobId!==jobId);
+  merged.jobEmployees = others.concat(localJobEmployeesForJob||[]);
+  if(removedBoardPostId && Array.isArray(merged.boardPosts)){
+    merged.boardPosts = merged.boardPosts.filter(p=>p.id!==removedBoardPostId);
+  }
+  return merged;
+}
+function pushJobChange(jobId, removedBoardPostId, attempt){
+  attempt = attempt || 1;
+  if(!fbDB) return; // ไม่ได้เชื่อมคลาวด์ — บันทึกในเครื่องอย่างเดียวก็พอ
+  fbPendingLocalWrite=true;
+  fbInFlightWrites++;
+  const docRef = fbDB.collection('saintmungo_jms').doc('main');
+  const localJob = DB.jobs.find(j=>j.id===jobId) || null;
+  const localJobEmployeesForJob = DB.jobEmployees.filter(je=>je.jobId===jobId);
+  fbDB.runTransaction(async (transaction)=>{
+    const doc = await transaction.get(docRef);
+    const remotePayload = (doc.exists && doc.data() && doc.data().payload) ? doc.data().payload : DB;
+    const merged = mergeJobIntoPayload(remotePayload, jobId, localJob, localJobEmployeesForJob, removedBoardPostId);
+    transaction.set(docRef, {payload: merged, updatedAt: Date.now()});
+    return merged;
+  }).then(merged=>{
+    fbPendingLocalWrite=false;
+    fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
+    fbPushRetryCount=0;
+    DB.jobs = merged.jobs;
+    DB.jobEmployees = merged.jobEmployees;
+    if(removedBoardPostId) DB.boardPosts = merged.boardPosts;
+    saveDBLocal();
+    markUnsyncedPending(false);
+    fbSetStatus('ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
+    catchUpFromServerIfMissed();
+    render();
+  }).catch(err=>{
+    fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
+    if(attempt<4){ setTimeout(()=>pushJobChange(jobId, removedBoardPostId, attempt+1), 800*attempt); return; }
+    fbPendingLocalWrite=false;
+    markUnsyncedPending(true);
+    fbSetStatus('ซิงค์งานไม่สำเร็จ: '+err.message, false);
+    toast('บันทึกในเครื่องสำเร็จ แต่ซิงค์งานขึ้นคลาวด์ไม่สำเร็จ ('+err.message+')','err','fa-triangle-exclamation');
+  });
+}
+/* Generic scoped merge for plain array fields whose items are independent records identified by
+   id (boardPosts, centralFund, leaveRecords, warnings). Same idea as pushQueueChange: re-run the
+   exact same add/edit/delete operation against whatever is actually on the server right now,
+   instead of overwriting the whole array (let alone the whole document) with a possibly-stale
+   local copy. applyFn receives the server's current array for that field and returns the new one. */
+function pushListChange(fieldName, applyFn, attempt){
+  attempt = attempt || 1;
+  if(!fbDB) return; // ไม่ได้เชื่อมคลาวด์ — บันทึกในเครื่องอย่างเดียวก็พอ
+  fbPendingLocalWrite=true;
+  fbInFlightWrites++;
+  const docRef = fbDB.collection('saintmungo_jms').doc('main');
+  fbDB.runTransaction(async (transaction)=>{
+    const doc = await transaction.get(docRef);
+    const remotePayload = (doc.exists && doc.data() && doc.data().payload) ? doc.data().payload : DB;
+    const merged = JSON.parse(JSON.stringify(remotePayload));
+    if(!Array.isArray(merged[fieldName])) merged[fieldName]=[];
+    merged[fieldName] = applyFn(merged[fieldName]) || merged[fieldName];
+    transaction.set(docRef, {payload: merged, updatedAt: Date.now()});
+    return merged;
+  }).then(merged=>{
+    fbPendingLocalWrite=false;
+    fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
+    fbPushRetryCount=0;
+    DB[fieldName] = merged[fieldName];
+    saveDBLocal();
+    markUnsyncedPending(false);
+    fbSetStatus('ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
+    catchUpFromServerIfMissed();
+    render();
+  }).catch(err=>{
+    fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
+    if(attempt<4){ setTimeout(()=>pushListChange(fieldName, applyFn, attempt+1), 800*attempt); return; }
+    fbPendingLocalWrite=false;
+    markUnsyncedPending(true);
+    fbSetStatus('ซิงค์ไม่สำเร็จ: '+err.message, false);
+    toast('บันทึกในเครื่องสำเร็จ แต่ซิงค์ขึ้นคลาวด์ไม่สำเร็จ ('+err.message+')','err','fa-triangle-exclamation');
+  });
+}
+/* Persistent "there is unsynced data" flag, stored outside the app state so it survives a page
+   reload or the tab being closed entirely — not just a toast that vanishes after a few seconds.
+   Set to true the moment a push starts failing/retrying, cleared the moment a push succeeds. On
+   next load, if this is still true, a sticky banner is shown until the user retries successfully
+   or dismisses it (dismissing does not clear the underlying flag/data, only hides the banner for
+   this session, so a fresh reload will still warn again if the data genuinely never made it up). */
+const UNSYNCED_FLAG_KEY='sm_unsynced_pending';
+function markUnsyncedPending(isPending){
+  if(isPending) safeStorage.setItem(UNSYNCED_FLAG_KEY, '1');
+  else safeStorage.removeItem(UNSYNCED_FLAG_KEY);
+  updateUnsyncedBanner();
+}
+function updateUnsyncedBanner(){
+  const el=document.getElementById('unsyncedBanner');
+  if(!el) return;
+  const pending = safeStorage.getItem(UNSYNCED_FLAG_KEY)==='1' && !document.body.dataset.unsyncedDismissed;
+  el.style.display = pending ? 'flex' : 'none';
+}
+function retryUnsyncedNow(){
+  if(!fbDB){ toast('ยังไม่ได้เชื่อมต่อ Firebase อยู่ตอนนี้ กรุณาตั้งค่าการเชื่อมต่อในหน้าตั้งค่าก่อน','err','fa-triangle-exclamation'); return; }
+  fbPushRetryCount=0;
+  doFirebasePush();
+  toast('กำลังลองซิงค์ข้อมูลขึ้นคลาวด์อีกครั้ง...','info','fa-cloud-arrow-up');
+}
+function dismissUnsyncedBanner(){
+  document.body.dataset.unsyncedDismissed='1';
+  updateUnsyncedBanner();
 }
 
 function findUserById(id){ return (DB.users||[]).find(u=>u.id===id); }
@@ -1994,11 +2333,24 @@ function openBoardModal(id){
     rememberCustomType(data.type);
     if(post){
       Object.assign(post,data);
-      saveDB(); toast('แก้ไขประกาศ "'+data.title+'" แล้ว','ok','fa-check'); notifyDiscordBoardPost(post, false); closeModal(); render();
+      saveDBLocal();
+      clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+      pushListChange('boardPosts', list=>{
+        const i=list.findIndex(p=>p.id===post.id);
+        if(i===-1) return list.concat([post]);
+        const copy=list.slice(); copy[i]=post; return copy;
+      });
+      toast('แก้ไขประกาศ "'+data.title+'" แล้ว','ok','fa-check'); notifyDiscordBoardPost(post, false); closeModal(); render();
     } else {
       data.id=uid('bp'); data.createdAt=todayStr(); data.tagNumber=generateBoardTag();
       DB.boardPosts.push(data);
-      saveDB(); toast('ติดประกาศงาน "'+data.title+'" แล้ว (เลขแท็ก '+data.tagNumber+')','ok','fa-thumbtack'); notifyDiscordBoardPost(data, true); closeModal(); render();
+      saveDBLocal();
+      clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+      pushListChange('boardPosts', list=>{
+        if(list.find(p=>p.id===data.id)) return list;
+        return list.concat([data]);
+      });
+      toast('ติดประกาศงาน "'+data.title+'" แล้ว (เลขแท็ก '+data.tagNumber+')','ok','fa-thumbtack'); notifyDiscordBoardPost(data, true); closeModal(); render();
     }
   };
 }
@@ -2006,14 +2358,20 @@ function deleteBoardPost(id){
   const post=DB.boardPosts.find(p=>p.id===id);
   confirmDelete('ต้องการดึงประกาศ "'+(post?post.title:'')+'" ออกจากบอร์ดหรือไม่?', ()=>{
     DB.boardPosts=DB.boardPosts.filter(p=>p.id!==id);
-    saveDB(); toast('ดึงประกาศออกจากบอร์ดแล้ว','info','fa-circle-xmark'); render();
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('boardPosts', list=>list.filter(p=>p.id!==id));
+    toast('ดึงประกาศออกจากบอร์ดแล้ว','info','fa-circle-xmark'); render();
   });
 }
 function deleteAllBoardPosts(){
   if(!DB.boardPosts.length){ toast('ไม่มีประกาศให้ลบ','info','fa-circle-xmark'); return; }
   confirmDelete('ต้องการลบประกาศงานว่าจ้างทั้งหมด ('+DB.boardPosts.length+' รายการ) ออกจากบอร์ดหรือไม่?', ()=>{
     DB.boardPosts=[];
-    saveDB(); toast('ลบประกาศทั้งหมดออกจากบอร์ดแล้ว','err','fa-trash'); render();
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('boardPosts', ()=>[]);
+    toast('ลบประกาศทั้งหมดออกจากบอร์ดแล้ว','err','fa-trash'); render();
   });
 }
 function initBoardDrag(){
@@ -2048,7 +2406,16 @@ function initBoardDrag(){
         card.classList.remove('dragging');
         const id=card.getAttribute('data-id');
         const post=DB.boardPosts.find(p=>p.id===id);
-        if(post){ post.x=parseFloat(card.style.left); post.y=parseFloat(card.style.top); saveDB(); }
+        if(post){
+          post.x=parseFloat(card.style.left); post.y=parseFloat(card.style.top);
+          saveDBLocal();
+          clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+          pushListChange('boardPosts', list=>{
+            const i=list.findIndex(p=>p.id===post.id);
+            if(i===-1) return list;
+            const copy=list.slice(); copy[i]={...copy[i], x:post.x, y:post.y}; return copy;
+          });
+        }
       };
       document.addEventListener('mousemove',move);
       document.addEventListener('mouseup',up);
@@ -2287,7 +2654,10 @@ function deleteAllJobOrder(){
   if(!DB.jobEmployees.length){ toast('ไม่มีข้อมูลลำดับการรับงานให้ลบ','info','fa-circle-xmark'); return; }
   confirmDelete('ต้องการลบข้อมูลลำดับการรับงานทั้งหมด ('+DB.jobEmployees.length+' รายการ) หรือไม่? การมอบหมายพนักงานในทุกงานจะถูกลบ แต่ตัวงานยังอยู่ในระบบ', ()=>{
     DB.jobEmployees=[];
-    saveDB(); toast('ลบข้อมูลลำดับการรับงานทั้งหมดแล้ว','err','fa-trash'); render();
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('jobEmployees', ()=>[]);
+    toast('ลบข้อมูลลำดับการรับงานทั้งหมดแล้ว','err','fa-trash'); render();
   });
 }
 
@@ -2520,11 +2890,17 @@ function openJobModal(jobId){
       logActivity('job_assign', detail);
     }
     syncJobAssignees(jobId2, assigneeIds, data.status);
+    let consumedBoardPostId=null;
     if(usedBoardPostId && DB.boardPosts.some(p=>p.id===usedBoardPostId)){
       DB.boardPosts=DB.boardPosts.filter(p=>p.id!==usedBoardPostId);
+      consumedBoardPostId=usedBoardPostId;
       toast('รับงานสำเร็จ และดึงประกาศออกจากบอร์ดแล้ว','ok','fa-thumbtack');
     }
-    saveDB(); closeModal(); render();
+    saveDBLocal();
+    clearTimeout(fbPushTimer);
+    fbPendingLocalWrite=false;
+    pushJobChange(jobId2, consumedBoardPostId);
+    closeModal(); render();
   };
 }
 function syncJobAssignees(jobId, employeeIds, status){
@@ -2547,8 +2923,12 @@ function completeJob(jobId){
   if(j.status==='เสร็จสิ้น'){ toast('งานนี้เสร็จสิ้นอยู่แล้ว','info','fa-circle-check'); return; }
   j.status='เสร็จสิ้น';
   DB.jobEmployees.filter(je=>je.jobId===jobId).forEach(je=>{ if(!je.checkOut) je.checkOut=j.endTime; });
-  saveDB(); toast('ส่งงาน '+jobId+' เรียบร้อย เปลี่ยนสถานะเป็นเสร็จสิ้นแล้ว','ok','fa-circle-check');
   logActivity('job_complete', 'ส่งงาน '+jobId+' ('+j.customer+' - '+j.type+') เสร็จสิ้น');
+  saveDBLocal();
+  clearTimeout(fbPushTimer);
+  fbPendingLocalWrite=false;
+  pushJobChange(jobId);
+  toast('ส่งงาน '+jobId+' เรียบร้อย เปลี่ยนสถานะเป็นเสร็จสิ้นแล้ว','ok','fa-circle-check');
   render();
 }
 function deleteJob(jobId){
@@ -2556,8 +2936,12 @@ function deleteJob(jobId){
     const j=DB.jobs.find(x=>x.id===jobId);
     DB.jobs=DB.jobs.filter(j=>j.id!==jobId);
     DB.jobEmployees=DB.jobEmployees.filter(je=>je.jobId!==jobId);
-    saveDB(); toast('ลบงาน '+jobId+' แล้ว','err','fa-trash');
     logActivity('job_delete', 'ลบงาน '+jobId+(j?' ('+j.customer+' - '+j.type+')':''));
+    saveDBLocal();
+    clearTimeout(fbPushTimer);
+    fbPendingLocalWrite=false;
+    pushJobChange(jobId);
+    toast('ลบงาน '+jobId+' แล้ว','err','fa-trash');
     render();
   });
 }
@@ -2565,7 +2949,11 @@ function deleteAllJobs(){
   if(!DB.jobs.length){ toast('ไม่มีงานให้ลบ','info','fa-circle-xmark'); return; }
   confirmDelete('ต้องการลบงานทั้งหมด ('+DB.jobs.length+' รายการ) หรือไม่? การมอบหมายพนักงานที่เกี่ยวข้องจะถูกลบไปด้วย และไม่สามารถย้อนกลับได้', ()=>{
     DB.jobs=[]; DB.jobEmployees=[];
-    saveDB(); toast('ลบงานทั้งหมดแล้ว','err','fa-trash'); render();
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('jobs', ()=>[]);
+    pushListChange('jobEmployees', ()=>[]);
+    toast('ลบงานทั้งหมดแล้ว','err','fa-trash'); render();
   });
 }
 function openJobDetail(jobId){
@@ -2713,6 +3101,7 @@ function attendanceSplitTablesHtml(days){
     ${otherEmps.length ? `<div style="margin:22px 0 10px;font-weight:700;color:var(--ink);"><i class="fa-solid fa-user" style="margin-right:6px;"></i>ตำแหน่งอื่นๆ</div>${attendanceTableHtml(otherEmps, days)}` : ''}
   `;
 }
+const fbAttendanceDebounce={};
 function cycleAtt(empId, iso){
   if(!canEdit('attendance')){ toast('ไม่มีสิทธิ์เปลี่ยนสถานะเข้าเวร','err','fa-lock'); return; }
   if(!DB.attendance[empId]) DB.attendance[empId]={};
@@ -2720,7 +3109,16 @@ function cycleAtt(empId, iso){
   const idx=ATT_CYCLE.indexOf(cur);
   const next=ATT_CYCLE[(idx+1)%ATT_CYCLE.length];
   if(next==='none') delete DB.attendance[empId][iso]; else DB.attendance[empId][iso]=next;
-  saveDB(); render();
+  saveDBLocal();
+  render();
+  /* เช็คชื่อของพนักงานคนเดียวกันเก็บใน DB.attendance[empId] ซึ่งมีระบบ merge เฉพาะของเข้าเวรอยู่แล้ว
+     (pushShiftChange merges attendance ต่อคนได้ถูกต้อง) จึงใช้ระบบเดียวกันแทนการเขียนทับทั้งก้อน
+     หน่วงเวลาเล็กน้อยต่อคน กันไม่ให้แอดมินคลิกรัวๆ หลายช่องแล้วยิง transaction ถี่เกินไป */
+  clearTimeout(fbAttendanceDebounce[empId]);
+  fbAttendanceDebounce[empId]=setTimeout(()=>{
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushShiftChange(empId);
+  }, 400);
 }
 function deleteAllAttendance(){
   const count = Object.values(DB.attendance).reduce((s,m)=>s+Object.keys(m).filter(d=>d.slice(0,7)===ATT_MONTH).length,0);
@@ -2731,7 +3129,9 @@ function deleteAllAttendance(){
         if(date.slice(0,7)===ATT_MONTH) delete DB.attendance[empId][date];
       });
     });
-    saveDB(); toast('ลบข้อมูลเข้าเวรเดือนนี้แล้ว','err','fa-trash'); render();
+    saveDBLocal();
+    pushShiftBulkChange();
+    toast('ลบข้อมูลเข้าเวรเดือนนี้แล้ว','err','fa-trash'); render();
   });
 }
 
@@ -2772,8 +3172,14 @@ function clockIn(empId){
   const today=todayStr();
   if(!DB.attendance[empId]) DB.attendance[empId]={};
   if(DB.attendance[empId][today]!=='leave') DB.attendance[empId][today]='present';
-  saveDB();
   logActivity('clock_in','เช็คอินเข้าเวร (เช็คชื่อเข้าเวรอัตโนมัติ)');
+  /* logActivity() calls saveDB() internally, which schedules a whole-document overwrite push
+     (queueFirebasePush). That kind of push is exactly what causes clock-in/out state to get
+     clobbered when two people act at the same time, so cancel it here and push this shift
+     change through the safe per-employee merge transaction instead. */
+  clearTimeout(fbPushTimer);
+  fbPendingLocalWrite=false;
+  pushShiftChange(empId);
   toast('เช็คอินเข้าเวรสำเร็จ — สถานะออนไลน์ และเช็คชื่อเข้าเวรวันนี้ให้อัตโนมัติแล้ว','ok','fa-right-to-bracket');
   showShiftPopup('🟢 เข้าเวรสำเร็จ');
   sendDiscordShiftNotify('in', emp ? emp.name : (STATE.currentUser?STATE.currentUser.name:''), emp ? emp.role : '');
@@ -2786,8 +3192,12 @@ function clockOut(empId){
   shift.checkOutAt=Date.now();
   const emp=DB.employees.find(e=>e.id===empId);
   if(emp && emp.status==='ออนไลน์') emp.status='ออฟไลน์';
-  saveDB();
   logActivity('clock_out','เช็คเอาท์ออกเวร ('+fmtHours(shift.checkOutAt-shift.checkInAt)+')');
+  /* see clockIn() for why we cancel the whole-document debounce here and push via the
+     safe per-employee merge transaction instead */
+  clearTimeout(fbPushTimer);
+  fbPendingLocalWrite=false;
+  pushShiftChange(empId);
   toast('เช็คเอาท์สำเร็จ ทำงาน '+fmtHours(shift.checkOutAt-shift.checkInAt)+' — สถานะเปลี่ยนเป็นออฟไลน์','ok','fa-right-from-bracket');
   showShiftPopup('🔴 ออกเวรสำเร็จ');
   sendDiscordShiftNotify('out', emp ? emp.name : (STATE.currentUser?STATE.currentUser.name:''), emp ? emp.role : '');
@@ -2805,8 +3215,11 @@ function getEmployeeTotalMs(empId){
 }
 function deleteShiftLog(shiftId){
   confirmDelete('ต้องการลบรายการเข้าเวรนี้หรือไม่?', ()=>{
+    const log=DB.shiftLogs.find(s=>s.id===shiftId);
     DB.shiftLogs = DB.shiftLogs.filter(s=>s.id!==shiftId);
-    saveDB(); toast('ลบรายการแล้ว','err','fa-trash'); render();
+    saveDBLocal();
+    if(log) pushShiftChange(log.employeeId); else pushShiftBulkChange();
+    toast('ลบรายการแล้ว','err','fa-trash'); render();
   });
 }
 function deleteHourAdjustment(adjId){
@@ -2820,7 +3233,7 @@ function deleteAllWorkHours(){
   if(!total){ toast('ไม่มีข้อมูลชั่วโมงทำงานให้ลบ','info','fa-circle-xmark'); return; }
   confirmDelete('ต้องการลบข้อมูลชั่วโมงทำงานทั้งหมด ('+total+' รายการ) ของทุกคน แล้วเริ่มนับใหม่หรือไม่? การลบนี้ไม่สามารถย้อนกลับได้', ()=>{
     DB.shiftLogs=[]; DB.hourAdjustments=[];
-    saveDB(); toast('ลบข้อมูลชั่วโมงทำงานทั้งหมดแล้ว เริ่มนับใหม่','err','fa-trash'); render();
+    saveDB(); pushShiftBulkChange(); toast('ลบข้อมูลชั่วโมงทำงานทั้งหมดแล้ว เริ่มนับใหม่','err','fa-trash'); render();
   });
 }
 function resetEmployeeHours(empId){
@@ -2831,6 +3244,7 @@ function resetEmployeeHours(empId){
     DB.shiftLogs=(DB.shiftLogs||[]).filter(s=>s.employeeId!==empId);
     DB.hourAdjustments=(DB.hourAdjustments||[]).filter(a=>a.employeeId!==empId);
     saveDB();
+    pushShiftChange(empId);
     logActivity('reset_hours','รีเซ็ตชั่วโมงสะสมของ '+emp.name);
     toast('รีเซ็ตชั่วโมงของ '+emp.name+' แล้ว เริ่มนับใหม่','err','fa-rotate-left');
     render();
@@ -2846,6 +3260,7 @@ function resetHoursByRole(role){
     DB.shiftLogs=(DB.shiftLogs||[]).filter(s=>!ids.includes(s.employeeId));
     DB.hourAdjustments=(DB.hourAdjustments||[]).filter(a=>!ids.includes(a.employeeId));
     saveDB();
+    pushShiftBulkChange();
     logActivity('reset_hours','รีเซ็ตชั่วโมงสะสมของตำแหน่ง '+roleLabel+' ทั้งหมด');
     toast('รีเซ็ตชั่วโมงของตำแหน่ง '+roleLabel+' ทั้งหมดแล้ว','err','fa-rotate-left');
     render();
@@ -3052,9 +3467,15 @@ function joinQueue(empId){
   if(!DB.queue) DB.queue=[];
   if(DB.queue.find(q=>q.employeeId===empId)){ toast('อยู่ในคิวอยู่แล้ว','err','fa-triangle-exclamation'); return; }
   const emp=DB.employees.find(e=>e.id===empId);
-  DB.queue.push({id:uid('q'), employeeId:empId, joinedAt:Date.now()});
-  saveDB();
+  const newItem={id:uid('q'), employeeId:empId, joinedAt:Date.now()};
+  DB.queue.push(newItem);
   logActivity('queue_join', (emp?emp.name:'')+' เข้าคิว');
+  clearTimeout(fbPushTimer);
+  fbPendingLocalWrite=false;
+  pushQueueChange(q=>{
+    if(q.find(x=>x.employeeId===empId)) return q; // มีคนนี้อยู่ในคิวบนคลาวด์แล้ว (เช่นกดซ้ำ) ไม่เพิ่มซ้ำ
+    return q.concat([newItem]);
+  });
   toast('เข้าคิวสำเร็จ','ok','fa-hourglass-half');
   render();
 }
@@ -3063,8 +3484,10 @@ function leaveQueue(qId){
   const emp=DB.employees.find(e=>e.id===item.employeeId);
   confirmDelete('ต้องการนำ '+(emp?emp.name:'')+' ออกจากคิวหรือไม่?', ()=>{
     DB.queue=(DB.queue||[]).filter(q=>q.id!==qId);
-    saveDB();
     logActivity('queue_leave', (emp?emp.name:'')+' ออกจากคิว');
+    clearTimeout(fbPushTimer);
+    fbPendingLocalWrite=false;
+    pushQueueChange(q=>q.filter(x=>x.id!==qId));
     toast('ออกจากคิวแล้ว','err','fa-trash'); render();
   });
 }
@@ -3076,13 +3499,24 @@ function advanceQueue(qId){
     idx = DB.queue.findIndex(q=>q.id===qId);
     if(idx===-1){ toast('ไม่พบรายการคิวนี้แล้ว','err','fa-triangle-exclamation'); return; }
   }
+  const targetId = DB.queue[idx].id; // จำ id ที่แน่นอนไว้ เพื่อให้ฝั่งเซิร์ฟเวอร์เลื่อน "คนคนนี้" ตัวเดิม แม้ลำดับคิวจะขยับไปแล้วจากคนอื่น
   const [moved] = DB.queue.splice(idx,1);
   moved.joinedAt=Date.now();
   DB.queue.push(moved);
   const emp=DB.employees.find(e=>e.id===moved.employeeId);
   const nextEmp=DB.queue[0] ? DB.employees.find(e=>e.id===DB.queue[0].employeeId) : null;
-  saveDB();
   logActivity('queue_advance', 'เลื่อนคิว: '+(emp?emp.name:'')+' ไปต่อคิว ถัดไปคือ '+(nextEmp?nextEmp.name:''));
+  clearTimeout(fbPushTimer);
+  fbPendingLocalWrite=false;
+  pushQueueChange(q=>{
+    const i=q.findIndex(x=>x.id===targetId);
+    if(i===-1) return q; // ถูกลบออกจากคิวไปแล้วโดยคนอื่นพอดี ไม่ต้องทำอะไรเพิ่ม
+    const copy=q.slice();
+    const [m]=copy.splice(i,1);
+    m.joinedAt=Date.now();
+    copy.push(m);
+    return copy;
+  });
   toast('เลื่อนคิวแล้ว — ถัดไปคือ '+(nextEmp?nextEmp.name:''),'ok','fa-rotate-left');
   render();
 }
@@ -3090,8 +3524,10 @@ function clearQueue(){
   if(!DB.queue || !DB.queue.length){ toast('ไม่มีคิวให้ล้าง','info','fa-circle-xmark'); return; }
   confirmDelete('ต้องการล้างคิวทั้งหมดหรือไม่?', ()=>{
     DB.queue=[];
-    saveDB();
     logActivity('queue_clear','ล้างคิวทั้งหมด');
+    clearTimeout(fbPushTimer);
+    fbPendingLocalWrite=false;
+    pushQueueChange(()=>[]);
     toast('ล้างคิวทั้งหมดแล้ว','err','fa-trash'); render();
   });
 }
@@ -3206,16 +3642,24 @@ function openWarningModal(warnId){
     if(!DB.warnings) DB.warnings=[];
     if(rec){
       Object.assign(rec,{name:data.name, house:data.house, reason:data.reason, fine:Number(data.fine)||0, count:Number(data.count)||1, imageUrl:data.imageUrl||''});
-      saveDB();
       logActivity('warning_edit', 'แก้ไขการตักเตือนของ '+rec.name);
+      saveDBLocal();
+      clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+      pushListChange('warnings', list=>{
+        const i=list.findIndex(w=>w.id===rec.id);
+        if(i===-1) return list.concat([rec]);
+        const copy=list.slice(); copy[i]=rec; return copy;
+      });
       toast('แก้ไขการตักเตือนสำเร็จ','ok','fa-check');
       closeModal(); render();
       return;
     }
     const newRec={id:uid('warn'), name:data.name, house:data.house, reason:data.reason, fine:Number(data.fine)||0, count:Number(data.count)||1, imageUrl:data.imageUrl||'', createdAt:Date.now(), createdBy: STATE.currentUser?STATE.currentUser.name:'ไม่ทราบผู้ใช้', createdById: STATE.currentUser?STATE.currentUser.id:null, createdByRole: STATE.currentUser?STATE.currentUser.role:STATE.role};
     DB.warnings.push(newRec);
-    saveDB();
     logActivity('warning_add', 'ตักเตือน '+data.name+' ('+data.house+') ครั้งที่ '+newRec.count+(data.fine?(' ค่าปรับ '+data.fine+' Sickle'):''));
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('warnings', list=>list.find(w=>w.id===newRec.id) ? list : list.concat([newRec]));
     sendDiscordWarningNotify(newRec);
     toast('บันทึกการตักเตือนสำเร็จ','ok','fa-triangle-exclamation');
     closeModal(); render();
@@ -3226,8 +3670,10 @@ function deleteWarning(id){
   const w=(DB.warnings||[]).find(x=>x.id===id); if(!w) return;
   confirmDelete('ต้องการลบบันทึกการตักเตือนของ '+w.name+' หรือไม่?', ()=>{
     DB.warnings=(DB.warnings||[]).filter(x=>x.id!==id);
-    saveDB();
     logActivity('warning_delete','ลบการตักเตือนของ '+w.name);
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('warnings', list=>list.filter(x=>x.id!==id));
     toast('ลบบันทึกแล้ว','err','fa-trash'); render();
   });
 }
@@ -3332,7 +3778,7 @@ function autoMarkAbsentPastDays(){
     });
   });
   safeStorage.setItem(ABSENT_CHECK_KEY, today);
-  if(changed){ saveDB(); if(typeof render==='function' && document.getElementById('pages')) render(); }
+  if(changed){ saveDBLocal(); pushShiftBulkChange(); if(typeof render==='function' && document.getElementById('pages')) render(); }
 }
 function pageLeave(){
   const isStaffView = !canEdit('leave');
@@ -3391,21 +3837,31 @@ function openLeaveModal(){
     if(!DB.attendance[data.employeeId]) DB.attendance[data.employeeId]={};
     const attStatus = data.leaveType==='rest' ? 'rest' : 'leave';
     dateRange(data.dateFrom,data.dateTo).forEach(iso=>{ DB.attendance[data.employeeId][iso]=attStatus; });
-    saveDB(); toast('บันทึกการลาสำเร็จ — อัปเดตเช็คเข้าเวรและแฟ้มสะสมผลงานแล้ว','ok','fa-check'); closeModal(); render();
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('leaveRecords', list=>list.find(x=>x.id===data.id) ? list : list.concat([data]));
+    pushShiftChange(data.employeeId); // attendance ถูกจัดการโดยระบบ merge ของเข้าเวรโดยเฉพาะ ต้อง push แยกผ่านตรงนี้
+    toast('บันทึกการลาสำเร็จ — อัปเดตเช็คเข้าเวรและแฟ้มสะสมผลงานแล้ว','ok','fa-check'); closeModal(); render();
   };
 }
 function deleteLeaveRecord(id){
   const r=DB.leaveRecords.find(x=>x.id===id); if(!r) return;
   confirmDelete('ต้องการลบบันทึกการลานี้หรือไม่? (สถานะ "ลา" ในเช็คเข้าเวรของวันที่เกี่ยวข้องจะยังคงอยู่)', ()=>{
     DB.leaveRecords=DB.leaveRecords.filter(x=>x.id!==id);
-    saveDB(); toast('ลบบันทึกการลาแล้ว','err','fa-trash'); render();
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('leaveRecords', list=>list.filter(x=>x.id!==id));
+    toast('ลบบันทึกการลาแล้ว','err','fa-trash'); render();
   });
 }
 function deleteAllLeave(){
   if(!DB.leaveRecords.length){ toast('ไม่มีบันทึกการลาให้ลบ','info','fa-circle-xmark'); return; }
   confirmDelete('ต้องการลบบันทึกการลาทั้งหมด ('+DB.leaveRecords.length+' รายการ) หรือไม่?', ()=>{
     DB.leaveRecords=[];
-    saveDB(); toast('ลบบันทึกการลาทั้งหมดแล้ว','err','fa-trash'); render();
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('leaveRecords', ()=>[]);
+    toast('ลบบันทึกการลาทั้งหมดแล้ว','err','fa-trash'); render();
   });
 }
 
@@ -3466,6 +3922,35 @@ function empFormHtml(emp){
   </form></div>
   <div class="modal-foot"><button class="btn btn-ghost" onclick="closeModal()">ยกเลิก</button><button class="btn btn-primary" id="saveEmpBtn"><i class="fa-solid fa-check"></i> บันทึก</button></div>`;
 }
+/* Employee avatar uploads are stored as base64 inside the shared Firestore document, so an
+   un-resized phone photo (often several MB) can single-handedly eat a big chunk of Firestore's
+   1MB-per-document limit. Resizing to a small square + re-encoding as JPEG keeps each avatar to
+   roughly 20-60KB instead, buying a lot of headroom before the document limit becomes a problem. */
+function compressImageDataUrl(file, maxDim, quality){
+  maxDim = maxDim || 200;
+  quality = quality || 0.75;
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onerror = ()=>reject(new Error('อ่านไฟล์รูปไม่สำเร็จ'));
+    reader.onload = ()=>{
+      const img = new Image();
+      img.onerror = ()=>reject(new Error('เปิดไฟล์รูปไม่สำเร็จ'));
+      img.onload = ()=>{
+        let w=img.width, h=img.height;
+        if(w>h){ if(w>maxDim){ h=Math.round(h*maxDim/w); w=maxDim; } }
+        else { if(h>maxDim){ w=Math.round(w*maxDim/h); h=maxDim; } }
+        const canvas=document.createElement('canvas');
+        canvas.width=w; canvas.height=h;
+        const ctx=canvas.getContext('2d');
+        ctx.drawImage(img,0,0,w,h);
+        try{ resolve(canvas.toDataURL('image/jpeg', quality)); }
+        catch(err){ resolve(reader.result); } // fallback: keep original if canvas export fails for any reason
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
 function openEmpModal(empId){
   const emp=empId?DB.employees.find(e=>e.id===empId):null;
   openModal(empFormHtml(emp));
@@ -3473,13 +3958,13 @@ function openEmpModal(empId){
   const avatarInput=document.getElementById('empAvatarInput');
   if(avatarInput) avatarInput.onchange=ev=>{
     const file=ev.target.files[0]; if(!file) return;
-    const reader=new FileReader();
-    reader.onload=r=>{
-      pendingAvatar=r.target.result;
+    compressImageDataUrl(file, 200, 0.75).then(dataUrl=>{
+      pendingAvatar=dataUrl;
       const prev=document.getElementById('empAvatarPreview');
       if(prev) prev.innerHTML=`<img src="${pendingAvatar}" style="width:100%;height:100%;object-fit:cover;">`;
-    };
-    reader.readAsDataURL(file);
+    }).catch(err=>{
+      toast('ประมวลผลรูปภาพไม่สำเร็จ: '+err.message,'err','fa-triangle-exclamation');
+    });
   };
   document.getElementById('saveEmpBtn').onclick=()=>{
     const form=document.getElementById('empForm');
@@ -3522,7 +4007,10 @@ function deleteAllEmployees(){
     const myEmpId = STATE.currentUser ? STATE.currentUser.employeeId : null;
     DB.employees=[]; DB.jobEmployees=[]; DB.attendance={};
     DB.users=(DB.users||[]).filter(u=>!u.employeeId);
-    saveDB(); toast('ลบพนักงานทั้งหมดแล้ว','err','fa-trash');
+    saveDB();
+    pushListChange('jobEmployees', ()=>[]);
+    pushShiftBulkChange();
+    toast('ลบพนักงานทั้งหมดแล้ว','err','fa-trash');
     if(myEmpId){ logout(); } else { render(); }
   });
 }
@@ -3546,7 +4034,10 @@ function clearEmployeePortfolio(empId){
   if(!count){ toast('ไม่มีประวัติผลงานให้ลบ','info','fa-circle-xmark'); return; }
   confirmDelete('ต้องการลบประวัติผลงานทั้งหมด ('+count+' รายการ) ของ '+emp.name+' หรือไม่?', ()=>{
     DB.jobEmployees=DB.jobEmployees.filter(je=>je.employeeId!==empId);
-    saveDB(); toast('ลบประวัติผลงานของ '+emp.name+' แล้ว','err','fa-trash'); render();
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('jobEmployees', list=>list.filter(je=>je.employeeId!==empId));
+    toast('ลบประวัติผลงานของ '+emp.name+' แล้ว','err','fa-trash'); render();
   });
 }
 function closeAllFolderMenus(){
@@ -3676,7 +4167,10 @@ function deleteAllHistory(){
   if(!DB.jobEmployees.length){ toast('ไม่มีประวัติการทำงานให้ลบ','info','fa-circle-xmark'); return; }
   confirmDelete('ต้องการลบประวัติการทำงานทั้งหมด ('+DB.jobEmployees.length+' รายการ) หรือไม่? การมอบหมายพนักงานในทุกงานจะถูกลบ แต่ตัวงานจะยังอยู่ในระบบ', ()=>{
     DB.jobEmployees=[];
-    saveDB(); toast('ลบประวัติการทำงานทั้งหมดแล้ว','err','fa-trash'); render();
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('jobEmployees', ()=>[]);
+    toast('ลบประวัติการทำงานทั้งหมดแล้ว','err','fa-trash'); render();
   });
 }
 function pageHistory(){
@@ -3761,21 +4255,30 @@ function openCentralFundModal(){
     const data=Object.fromEntries(new FormData(form).entries());
     data.id=uid('fund'); data.amount=Number(data.amount)||0; data.date=data.date||todayStr(); data.by='Admin';
     DB.centralFund.push(data);
-    saveDB(); toast('เพิ่มรายการกองกลางสำเร็จ'); closeModal(); render();
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('centralFund', list=>list.find(x=>x.id===data.id) ? list : list.concat([data]));
+    toast('เพิ่มรายการกองกลางสำเร็จ'); closeModal(); render();
   };
 }
 function deleteCentralFundEntry(id){
   const t=DB.centralFund.find(x=>x.id===id); if(!t) return;
   confirmDelete('ต้องการลบรายการ "'+t.title+'" หรือไม่?', ()=>{
     DB.centralFund=DB.centralFund.filter(x=>x.id!==id);
-    saveDB(); toast('ลบรายการกองกลางแล้ว','err','fa-trash'); render();
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('centralFund', list=>list.filter(x=>x.id!==id));
+    toast('ลบรายการกองกลางแล้ว','err','fa-trash'); render();
   });
 }
 function deleteAllCentralFund(){
   if(!DB.centralFund.length){ toast('ไม่มีรายการให้ลบ','info','fa-circle-xmark'); return; }
   confirmDelete('ต้องการลบรายการกองกลางทั้งหมด ('+DB.centralFund.length+' รายการ) หรือไม่?', ()=>{
     DB.centralFund=[];
-    saveDB(); toast('ลบรายการกองกลางทั้งหมดแล้ว','err','fa-trash'); render();
+    saveDBLocal();
+    clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
+    pushListChange('centralFund', ()=>[]);
+    toast('ลบรายการกองกลางทั้งหมดแล้ว','err','fa-trash'); render();
   });
 }
 
@@ -4560,6 +5063,8 @@ window.addEventListener('load',()=>{
   document.getElementById('themeBtn').innerHTML=svgIcon(STATE.theme==='dark'?'sun':'moon');
   autoMarkAbsentPastDays();
   setInterval(autoMarkAbsentPastDays, 60000); // re-check every minute in case app stays open past midnight
+  updateUnsyncedBanner(); // ถ้ามีข้อมูลที่ค้างไม่ได้ซิงค์จากเซสชันก่อนหน้า จะขึ้นแบนเนอร์เตือนไว้ถาวรจนกว่าจะซิงค์สำเร็จ
+  paintIcons(document.getElementById('unsyncedBanner'));
   render();
   /* Auto-connect everyone to the shared Firebase database on load, so all devices/browsers
      that open this file see the exact same live data (jobs, employees, attendance, etc.)
