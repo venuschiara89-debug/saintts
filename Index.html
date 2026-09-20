@@ -686,6 +686,7 @@ let fbMissedRemoteUpdate=false, fbPushRetryCount=0;
    จากคลาวด์มาทับข้อมูลที่ยังไม่ได้ซิงค์ขึ้นคลาวด์จริงๆ และให้ปุ่ม "ลองซิงค์อีกครั้ง" เรียกคืนได้ */
 let fbFailedPushQueue=[];
 let fbRecoveryInProgress=false; // true ระหว่างกำลังกู้คืนข้อมูลที่ค้างจากเซสชันก่อนหน้า
+let fbForceOverwrite=false; // true เฉพาะตอนกู้คืนจากไฟล์สำรอง — ให้ push รอบนั้นทับข้อมูลคลาวด์ทั้งหมด รวมฟิลด์ใน FB_SCOPED_FIELDS
 function queueFailedRetry(key, retryFn){
   const existing=fbFailedPushQueue.find(x=>x.key===key);
   if(existing) existing.retry=retryFn; else fbFailedPushQueue.push({key, retry:retryFn});
@@ -1169,7 +1170,7 @@ function doFirebasePush(){
     const doc = await transaction.get(docRef);
     const remotePayload = (doc.exists && doc.data() && doc.data().payload) ? doc.data().payload : null;
     const merged = JSON.parse(JSON.stringify(DB));
-    if(remotePayload){
+    if(remotePayload && !fbForceOverwrite){
       FB_SCOPED_FIELDS.forEach(f=>{ if(remotePayload[f]!==undefined) merged[f]=remotePayload[f]; });
     }
     transaction.set(docRef, {payload: merged, updatedAt: Date.now()});
@@ -1179,6 +1180,7 @@ function doFirebasePush(){
     fbPushRetryCount=0;
     // keep our own copy of the scoped fields in sync with whatever actually ended up on the server
     FB_SCOPED_FIELDS.forEach(f=>{ if(merged[f]!==undefined) DB[f]=merged[f]; });
+    fbForceOverwrite=false;
     saveDBLocal();
     clearFailedRetry('generic');
     if(!fbFailedPushQueue.length) markUnsyncedPending(false);
@@ -4995,6 +4997,7 @@ function restoreFirebaseBackup(backupId){
       if(!data.users || !data.users.length) data.users=defaultUsers();
       DB = data;
       ensureRolePermissions();
+      fbForceOverwrite=true;
       saveDB();
       toast('กู้คืนข้อมูลจาก Firebase เรียบร้อย','ok','fa-box-archive');
       logout();
@@ -5050,6 +5053,7 @@ function importBackupFile(file){
       if(!data.users || !data.users.length) data.users=defaultUsers();
       DB = data;
       ensureRolePermissions();
+      fbForceOverwrite=true;
       saveDB();
       toast('กู้คืนข้อมูลจากไฟล์สำรองเรียบร้อย','ok','fa-box-archive');
       logout();
