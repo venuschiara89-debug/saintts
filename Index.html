@@ -626,34 +626,9 @@ const safeStorage={
   setItem(k,v){ try{ localStorage.setItem(k,v); }catch(e){ _memStore[k]=v; } },
   removeItem(k){ try{ localStorage.removeItem(k); }catch(e){ delete _memStore[k]; } }
 };
-const DEFAULT_DISCORD_WEBHOOKS={
-  job:'https://discord.com/api/webhooks/1534184544385761440/i-SixcWWBfi2MBnr4rV9292hTEZLntuoAOj9TnADQHSdQd7xAPCFoV6BQboKWd6-oW3T',
-  board:'https://discord.com/api/webhooks/1540229816756867073/kwvCBYDzj2pXUNGdVAFGYc8qW-fiNYJHydeSh24ciYGjl3_PasVbNxqdenM_g3dV7lVY',
-  shift:'https://discord.com/api/webhooks/1517900296850903200/giz6hHjd-Tb-ilRNQDJ2U3_0Csb1LJqJf0j8l9PF0W785zSMXpEVzefid3vZLrzMQkB5',
-  warning:'https://discord.com/api/webhooks/1518558427452801184/W8Lz3pAIPs648ReEKLNYtLCEc9fAP4npe1PiHXffv5W35TGRzqEtM43A7Bhff-Lcm4Oj',
-  leave:'https://discord.com/api/webhooks/1547848617014861924/cfY7CIQPJuDfxtZFOY9sQhqHygLQCeeHAYC78RMy_1XClvPQwDKrVeYOLIZU7cpGtCao'
-};
-const DISCORD_WEBHOOK_LABELS={
-  job:{label:'แจ้งเตือนงานใหม่ / แก้ไขงาน', icon:'fa-scroll'},
-  board:{label:'แจ้งเตือนประกาศบนบอร์ดงานว่าจ้าง', icon:'fa-thumbtack'},
-  shift:{label:'แจ้งเตือนเข้า/ออกเวร', icon:'fa-business-time'},
-  warning:{label:'แจ้งเตือนการตักเตือน', icon:'fa-triangle-exclamation'},
-  leave:{label:'แจ้งเตือนการลา/พัก', icon:'fa-bed'}
-};
-/* เก็บ URL เว็บฮุก Discord ไว้ใน DB กลาง (ซิงค์ผ่าน Firebase เหมือนข้อมูลอื่นๆ) เพื่อให้ Admin
-   แก้ไขจากเครื่องไหนก็ได้แล้วมีผลกับทุกเครื่องที่เปิดระบบนี้ทันที — ถ้ายังไม่เคยตั้งค่าเอง
-   จะใช้ค่าเริ่มต้นที่ผูกไว้ในระบบ */
-function getDiscordWebhooks(){
-  if(!DB.discordWebhooks) DB.discordWebhooks={};
-  return {...DEFAULT_DISCORD_WEBHOOKS, ...DB.discordWebhooks};
-}
-function setDiscordWebhooks(obj){
-  DB.discordWebhooks={...obj};
-  saveDB(); // บันทึกในเครื่องนี้และซิงค์ขึ้นคลาวด์ให้ทุกเครื่องเห็นค่าที่เปลี่ยนทันที
-}
+const DISCORD_JOB_WEBHOOK_URL='https://discord.com/api/webhooks/1534184544385761440/i-SixcWWBfi2MBnr4rV9292hTEZLntuoAOj9TnADQHSdQd7xAPCFoV6BQboKWd6-oW3T';
 function notifyDiscordJob(job, isNew, assigneeNames){
-  const webhookUrl=getDiscordWebhooks().job;
-  if(!webhookUrl){ toast('ยังไม่ได้ตั้งค่า Discord webhook (งาน) กรุณาตั้งค่าในหน้าตั้งค่าระบบ','err','fa-triangle-exclamation'); return; }
+  if(!DISCORD_JOB_WEBHOOK_URL){ toast('ยังไม่ได้ตั้งค่า Discord webhook','err','fa-triangle-exclamation'); return; }
   const embed = {
     title: (isNew ? '📋 มีงานใหม่เข้าระบบ · ' : '✏️ มีการแก้ไขงาน · ')+(job.id||''),
     color: isNew ? 0xd4af37 : 0x3b82f6,
@@ -670,7 +645,7 @@ function notifyDiscordJob(job, isNew, assigneeNames){
     footer: { text: 'Saint Mungo JMS' },
     timestamp: new Date().toISOString()
   };
-  fetch(webhookUrl, {
+  fetch(DISCORD_JOB_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ embeds: [embed] })
@@ -682,18 +657,6 @@ function notifyDiscordJob(job, isNew, assigneeNames){
 }
 let fbApp=null, fbDB=null, fbUnsub=null, fbPushTimer=null, fbApplyingRemote=false, fbPendingLocalWrite=false, fbInFlightWrites=0;
 let fbMissedRemoteUpdate=false, fbPushRetryCount=0;
-/* เก็บ push ที่ล้มเหลวหลังลองครบทุกครั้งแล้ว (เช่นติดประกาศบอร์ดตอนเน็ตกระตุก) เพื่อกันไม่ให้ snapshot
-   จากคลาวด์มาทับข้อมูลที่ยังไม่ได้ซิงค์ขึ้นคลาวด์จริงๆ และให้ปุ่ม "ลองซิงค์อีกครั้ง" เรียกคืนได้ */
-let fbFailedPushQueue=[];
-let fbRecoveryInProgress=false; // true ระหว่างกำลังกู้คืนข้อมูลที่ค้างจากเซสชันก่อนหน้า
-let fbForceOverwrite=false; // true เฉพาะตอนกู้คืนจากไฟล์สำรอง — ให้ push รอบนั้นทับข้อมูลคลาวด์ทั้งหมด รวมฟิลด์ใน FB_SCOPED_FIELDS
-function queueFailedRetry(key, retryFn){
-  const existing=fbFailedPushQueue.find(x=>x.key===key);
-  if(existing) existing.retry=retryFn; else fbFailedPushQueue.push({key, retry:retryFn});
-}
-function clearFailedRetry(key){
-  fbFailedPushQueue=fbFailedPushQueue.filter(x=>x.key!==key);
-}
 const JOB_TYPES=['บำบัด','ฟาร์ม','เวทมนตร์','ปั๊มเวล','Event','อื่นๆ'];
 function allJobTypes(){
   const set=new Set(JOB_TYPES);
@@ -893,17 +856,6 @@ if(!DB.shiftLogs) DB.shiftLogs=[];
 if(!DB.hourAdjustments) DB.hourAdjustments=[];
 if(!DB.queue) DB.queue=[];
 if(!DB.warnings) DB.warnings=[];
-if(!DB.discordWebhooks) DB.discordWebhooks={};
-try{
-  // ก่อนหน้านี้เคยเก็บเว็บฮุกไว้ใน localStorage ของเครื่องนี้เท่านั้น — ถ้าเครื่องนี้เคยตั้งค่าไว้
-  // ให้ย้ายเข้า DB กลางครั้งเดียว จากนั้นจะซิงค์ผ่าน Firebase เหมือนข้อมูลอื่นๆ ทุกเครื่อง
-  const legacyWebhooks = JSON.parse(safeStorage.getItem('sm_discord_webhooks')||'null');
-  if(legacyWebhooks){
-    Object.keys(legacyWebhooks).forEach(k=>{ if(legacyWebhooks[k]) DB.discordWebhooks[k]=legacyWebhooks[k]; });
-    safeStorage.removeItem('sm_discord_webhooks');
-  }
-}catch(e){}
-Object.keys(DEFAULT_DISCORD_WEBHOOKS).forEach(k=>{ if(!DB.discordWebhooks[k]) DB.discordWebhooks[k]=DEFAULT_DISCORD_WEBHOOKS[k]; });
 if(!DB.users || !DB.users.length){
   DB.users = defaultUsers();
   const legacyAdminPass = safeStorage.getItem('sm_admin_password');
@@ -981,8 +933,6 @@ function ensureDbShape(){
   if(!DB.hourAdjustments) DB.hourAdjustments=[];
   if(!DB.queue) DB.queue=[];
   if(!DB.warnings) DB.warnings=[];
-  if(!DB.discordWebhooks) DB.discordWebhooks={};
-  Object.keys(DEFAULT_DISCORD_WEBHOOKS).forEach(k=>{ if(!DB.discordWebhooks[k]) DB.discordWebhooks[k]=DEFAULT_DISCORD_WEBHOOKS[k]; });
   if(!DB.users || !DB.users.length) DB.users=defaultUsers();
   ['usr-admin','usr-saint','usr-staff'].forEach(id=>{
     const u = DB.users.find(x=>x.id===id);
@@ -996,10 +946,9 @@ function saveDBLocal(){
 }
 function catchUpFromServerIfMissed(){
   if(!fbMissedRemoteUpdate || !fbDB) return;
-  if(fbPendingLocalWrite || fbInFlightWrites>0 || fbFailedPushQueue.length>0 || fbRecoveryInProgress) return; // ยังไม่ปลอดภัยที่จะดึงมาทับตอนนี้ รอรอบถัดไป
   fbMissedRemoteUpdate=false;
   fbDB.collection('saintmungo_jms').doc('main').get().then(snap=>{
-    if(!snap.exists || fbPendingLocalWrite || fbInFlightWrites>0 || fbFailedPushQueue.length>0 || fbRecoveryInProgress) return;
+    if(!snap.exists || fbPendingLocalWrite || fbInFlightWrites>0) return;
     const data=snap.data();
     if(!data || !data.payload) return;
     const incomingStr=JSON.stringify(data.payload);
@@ -1012,55 +961,6 @@ function catchUpFromServerIfMissed(){
     if(STATE.currentUser && !DB.users.find(u=>u.id===STATE.currentUser.id)){ logout(); }
     else { render(); }
   }).catch(()=>{});
-}
-/* กู้คืนข้อมูลที่ค้างซิงค์จากเซสชันก่อนหน้า โดย "ผสาน" (ไม่ใช่ทับ) กับข้อมูลบนคลาวด์ปัจจุบัน —
-   รายการที่เป็น array (เช่นประกาศบอร์ด, งาน, กองกลาง) จะรวมกันโดยยึด id ถ้า id ชนกันให้ของในเครื่องนี้
-   ชนะ เพราะเรากำลังกู้คืนของที่ "อาจจะยังไม่เคยขึ้นคลาวด์เลย" ส่วนเช็คชื่อเข้าเวรจะผสานตามรายคน/วัน
-   เพื่อไม่ให้ไปเบียดข้อมูลของคนอื่นที่แก้ไขระหว่างที่เราไม่ได้เชื่อมต่อ */
-function reconcileAfterReconnect(){
-  if(!fbDB) return;
-  fbRecoveryInProgress=true;
-  const docRef = fbDB.collection('saintmungo_jms').doc('main');
-  fbDB.runTransaction(async (transaction)=>{
-    const doc = await transaction.get(docRef);
-    const remotePayload = (doc.exists && doc.data() && doc.data().payload) ? doc.data().payload : null;
-    if(!remotePayload){
-      transaction.set(docRef, {payload: DB, updatedAt: Date.now()});
-      return DB;
-    }
-    const merged = JSON.parse(JSON.stringify(remotePayload));
-    const unionById=(remoteArr, localArr)=>{
-      remoteArr = Array.isArray(remoteArr) ? remoteArr : [];
-      localArr = Array.isArray(localArr) ? localArr : [];
-      const byId={};
-      remoteArr.forEach(x=>{ if(x && x.id!=null) byId[x.id]=x; });
-      localArr.forEach(x=>{ if(x && x.id!=null) byId[x.id]=x; });
-      return Object.values(byId);
-    };
-    ['boardPosts','centralFund','leaveRecords','warnings','queue','jobs','jobEmployees','shiftLogs'].forEach(f=>{
-      merged[f]=unionById(merged[f], DB[f]);
-    });
-    const mergedAttendance={...(merged.attendance||{})};
-    Object.keys(DB.attendance||{}).forEach(empId=>{
-      mergedAttendance[empId]={...(mergedAttendance[empId]||{}), ...(DB.attendance[empId]||{})};
-    });
-    merged.attendance=mergedAttendance;
-    transaction.set(docRef, {payload: merged, updatedAt: Date.now()});
-    return merged;
-  }).then(merged=>{
-    fbRecoveryInProgress=false;
-    DB=merged;
-    ensureDbShape();
-    saveDBLocal();
-    fbFailedPushQueue=[];
-    markUnsyncedPending(false);
-    fbSetStatus('กู้คืนข้อมูลที่ค้างซิงค์จากเซสชันก่อนหน้าสำเร็จ '+new Date().toLocaleTimeString('th-TH'), true);
-    render();
-  }).catch(err=>{
-    fbRecoveryInProgress=false;
-    markUnsyncedPending(true);
-    fbSetStatus('กู้คืนข้อมูลที่ค้างซิงค์ไม่สำเร็จ: '+err.message, false);
-  });
 }
 function connectFirebase(cfg, silent){
   if(typeof firebase==='undefined'){ if(!silent) toast('โหลด Firebase SDK ไม่สำเร็จ ตรวจสอบการเชื่อมต่ออินเทอร์เน็ต','err','fa-triangle-exclamation'); fbSetStatus('โหลด SDK ไม่สำเร็จ', false); return; }
@@ -1083,13 +983,6 @@ function connectFirebase(cfg, silent){
         fbSetStatus('เชื่อมต่อนานผิดปกติ — ตรวจสอบว่าสร้าง Firestore Database ในโปรเจกต์นี้แล้วหรือยัง (ต้องกด Create database ใน Firebase Console ไม่ใช่แค่ลงทะเบียนแอป) และ Security Rules อนุญาตให้อ่าน/เขียน', false);
       }
     }, 8000);
-    /* ถ้าเซสชันก่อนหน้าเคยติดประกาศ/แก้ไขอะไรไว้แต่ push ขึ้นคลาวด์ไม่สำเร็จจนครบจำนวนครั้ง แล้วผู้ใช้
-       ปิด/รีเฟรชแท็บไปก่อน ข้อมูลนั้นยังปลอดภัยอยู่ในเครื่องนี้ (ไม่หาย) แต่ถ้าปล่อยให้ snapshot ปกติ
-       จากคลาวด์มาทับตอนนี้เลย ข้อมูลที่ยังไม่เคยขึ้นคลาวด์จะถูกทิ้งไปเงียบๆ จึงต้องกู้คืน/ผสานข้อมูลนี้
-       ขึ้นคลาวด์ก่อน แล้วค่อยเริ่มรับข้อมูลสดจากคลาวด์ตามปกติ */
-    if(safeStorage.getItem(UNSYNCED_FLAG_KEY)==='1'){
-      reconcileAfterReconnect();
-    }
     fbUnsub = docRef.onSnapshot(snap=>{
       clearTimeout(stuckTimer);
       if(snap.exists){
@@ -1106,11 +999,12 @@ function connectFirebase(cfg, silent){
             fbSetStatus('เชื่อมต่อแล้ว · ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
             return;
           }
-          if(fbPendingLocalWrite || fbInFlightWrites>0 || fbFailedPushQueue.length>0 || fbRecoveryInProgress){
-            /* เรามีการแก้ไข (เช่นกดเข้า/ออกเวร หรือติดประกาศบอร์ด) ที่ยัง push ขึ้นคลาวด์ไม่เสร็จ/ไม่สำเร็จ
-               snapshot รอบนี้ยังเป็นข้อมูลเก่าก่อนหน้า push ของเรา ถ้าเอามาทับตอนนี้ ข้อมูลที่ยังไม่ได้
-               ซิงค์ (เช่นประกาศที่เพิ่งติดไว้) จะหายไปเงียบๆ จึงข้ามรอบนี้ไปก่อน แต่จำไว้ว่ามี snapshot
-               ที่ข้ามไป (fbMissedRemoteUpdate) เพื่อไปดึงข้อมูลล่าสุดซ้ำอีกครั้งทันทีที่ทุกอย่างซิงค์เสร็จ */
+          if(fbPendingLocalWrite || fbInFlightWrites>0){
+            /* เรามีการแก้ไข (เช่นกดเข้า/ออกเวร) ที่ยัง push ขึ้นคลาวด์ไม่เสร็จ — snapshot รอบนี้
+               ยังเป็นข้อมูลเก่าก่อนหน้า push ของเรา ถ้าเอามาทับตอนนี้จะทำให้สถานะที่เพิ่งกด
+               "เด้งกลับ" เหมือนไม่ได้กด จึงข้ามรอบนี้ไปก่อน แต่จำไว้ว่ามี snapshot ที่ข้ามไป
+               (fbMissedRemoteUpdate) เพื่อไปดึงข้อมูลล่าสุดซ้ำอีกครั้งทันทีที่ push ของเราเสร็จ
+               กันกรณีมีคนอื่นแก้ไขข้อมูลพร้อมกันแล้วเราไม่เคยเห็นการเปลี่ยนแปลงนั้นเลย */
             fbMissedRemoteUpdate=true;
             return;
           }
@@ -1170,7 +1064,7 @@ function doFirebasePush(){
     const doc = await transaction.get(docRef);
     const remotePayload = (doc.exists && doc.data() && doc.data().payload) ? doc.data().payload : null;
     const merged = JSON.parse(JSON.stringify(DB));
-    if(remotePayload && !fbForceOverwrite){
+    if(remotePayload){
       FB_SCOPED_FIELDS.forEach(f=>{ if(remotePayload[f]!==undefined) merged[f]=remotePayload[f]; });
     }
     transaction.set(docRef, {payload: merged, updatedAt: Date.now()});
@@ -1180,10 +1074,8 @@ function doFirebasePush(){
     fbPushRetryCount=0;
     // keep our own copy of the scoped fields in sync with whatever actually ended up on the server
     FB_SCOPED_FIELDS.forEach(f=>{ if(merged[f]!==undefined) DB[f]=merged[f]; });
-    fbForceOverwrite=false;
     saveDBLocal();
-    clearFailedRetry('generic');
-    if(!fbFailedPushQueue.length) markUnsyncedPending(false);
+    markUnsyncedPending(false);
     fbSetStatus('ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
     catchUpFromServerIfMissed();
   })
@@ -1197,7 +1089,6 @@ function doFirebasePush(){
       } else {
         markUnsyncedPending(true);
         fbSetStatus('ซิงค์ไม่สำเร็จ: '+err.message, false);
-        queueFailedRetry('generic', ()=>{ fbPushRetryCount=0; doFirebasePush(); });
       }
     });
 }
@@ -1227,9 +1118,8 @@ function mergeEmployeeShiftIntoPayload(remotePayload, empId){
   }
   return merged;
 }
-function pushShiftChange(empId, attempt, retryKey){
+function pushShiftChange(empId, attempt){
   attempt = attempt || 1;
-  retryKey = retryKey || ('shift:'+empId);
   if(!fbDB) return; // ไม่ได้เชื่อมคลาวด์ — บันทึกในเครื่องอย่างเดียวก็พอ
   fbPendingLocalWrite=true;
   fbInFlightWrites++;
@@ -1254,19 +1144,17 @@ function pushShiftChange(empId, attempt, retryKey){
       });
     }
     saveDBLocal();
-    clearFailedRetry(retryKey);
-    if(!fbFailedPushQueue.length) markUnsyncedPending(false);
+    markUnsyncedPending(false);
     fbSetStatus('ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
     catchUpFromServerIfMissed();
     render();
   }).catch(err=>{
     fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
-    if(attempt<4){ setTimeout(()=>pushShiftChange(empId, attempt+1, retryKey), 800*attempt); return; }
+    if(attempt<4){ setTimeout(()=>pushShiftChange(empId, attempt+1), 800*attempt); return; }
     fbPendingLocalWrite=false;
     markUnsyncedPending(true);
     fbSetStatus('ซิงค์เข้า/ออกเวรไม่สำเร็จ: '+err.message, false);
     toast('บันทึกในเครื่องสำเร็จ แต่ซิงค์ขึ้นคลาวด์ไม่สำเร็จ ('+err.message+')','err','fa-triangle-exclamation');
-    queueFailedRetry(retryKey, ()=>pushShiftChange(empId, 1, retryKey));
   });
 }
 /* For rare admin-wide bulk resets (wipe a whole month of attendance, wipe all shift history) that
@@ -1275,9 +1163,8 @@ function pushShiftChange(empId, attempt, retryKey){
    employee. Since this still runs as a transaction, it composes safely alongside any in-flight
    pushShiftChange/doFirebasePush calls: whichever commits second simply sees the first one's
    already-committed result and only overwrites its own fields on top of that. */
-function pushShiftBulkChange(attempt, retryKey){
+function pushShiftBulkChange(attempt){
   attempt = attempt || 1;
-  retryKey = retryKey || 'shiftbulk';
   if(!fbDB) return; // ไม่ได้เชื่อมคลาวด์ — บันทึกในเครื่องอย่างเดียวก็พอ
   fbPendingLocalWrite=true;
   fbInFlightWrites++;
@@ -1297,19 +1184,17 @@ function pushShiftBulkChange(attempt, retryKey){
     DB.shiftLogs=merged.shiftLogs;
     DB.attendance=merged.attendance;
     saveDBLocal();
-    clearFailedRetry(retryKey);
-    if(!fbFailedPushQueue.length) markUnsyncedPending(false);
+    markUnsyncedPending(false);
     fbSetStatus('ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
     catchUpFromServerIfMissed();
     render();
   }).catch(err=>{
     fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
-    if(attempt<4){ setTimeout(()=>pushShiftBulkChange(attempt+1, retryKey), 800*attempt); return; }
+    if(attempt<4){ setTimeout(()=>pushShiftBulkChange(attempt+1), 800*attempt); return; }
     fbPendingLocalWrite=false;
     markUnsyncedPending(true);
     fbSetStatus('ซิงค์ไม่สำเร็จ: '+err.message, false);
     toast('บันทึกในเครื่องสำเร็จ แต่ซิงค์ขึ้นคลาวด์ไม่สำเร็จ ('+err.message+')','err','fa-triangle-exclamation');
-    queueFailedRetry(retryKey, ()=>pushShiftBulkChange(1, retryKey));
   });
 }
 /* Queue operations (join/leave/advance/clear) are sequential edits to one shared list, so instead
@@ -1318,9 +1203,8 @@ function pushShiftBulkChange(attempt, retryKey){
    moment always end up applying both moves in some order, instead of one click silently vanishing
    because it overwrote the other person's change. applyFn receives the server's current queue
    array and must return the new array (does not mutate the array it's given). */
-function pushQueueChange(applyFn, attempt, retryKey){
+function pushQueueChange(applyFn, attempt){
   attempt = attempt || 1;
-  retryKey = retryKey || uid('queueretry');
   if(!fbDB) return; // ไม่ได้เชื่อมคลาวด์ — บันทึกในเครื่องอย่างเดียวก็พอ
   fbPendingLocalWrite=true;
   fbInFlightWrites++;
@@ -1339,19 +1223,17 @@ function pushQueueChange(applyFn, attempt, retryKey){
     fbPushRetryCount=0;
     DB.queue = merged.queue;
     saveDBLocal();
-    clearFailedRetry(retryKey);
-    if(!fbFailedPushQueue.length) markUnsyncedPending(false);
+    markUnsyncedPending(false);
     fbSetStatus('ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
     catchUpFromServerIfMissed();
     render();
   }).catch(err=>{
     fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
-    if(attempt<4){ setTimeout(()=>pushQueueChange(applyFn, attempt+1, retryKey), 800*attempt); return; }
+    if(attempt<4){ setTimeout(()=>pushQueueChange(applyFn, attempt+1), 800*attempt); return; }
     fbPendingLocalWrite=false;
     markUnsyncedPending(true);
     fbSetStatus('ซิงค์คิวไม่สำเร็จ: '+err.message, false);
     toast('บันทึกในเครื่องสำเร็จ แต่ซิงค์คิวขึ้นคลาวด์ไม่สำเร็จ ('+err.message+')','err','fa-triangle-exclamation');
-    queueFailedRetry(retryKey, ()=>pushQueueChange(applyFn, 1, retryKey));
   });
 }
 /* Job create/edit/assign/delete/complete only ever touch one job's own record plus its own
@@ -1378,9 +1260,8 @@ function mergeJobIntoPayload(remotePayload, jobId, localJob, localJobEmployeesFo
   }
   return merged;
 }
-function pushJobChange(jobId, removedBoardPostId, attempt, retryKey){
+function pushJobChange(jobId, removedBoardPostId, attempt){
   attempt = attempt || 1;
-  retryKey = retryKey || ('job:'+jobId);
   if(!fbDB) return; // ไม่ได้เชื่อมคลาวด์ — บันทึกในเครื่องอย่างเดียวก็พอ
   fbPendingLocalWrite=true;
   fbInFlightWrites++;
@@ -1401,19 +1282,17 @@ function pushJobChange(jobId, removedBoardPostId, attempt, retryKey){
     DB.jobEmployees = merged.jobEmployees;
     if(removedBoardPostId) DB.boardPosts = merged.boardPosts;
     saveDBLocal();
-    clearFailedRetry(retryKey);
-    if(!fbFailedPushQueue.length) markUnsyncedPending(false);
+    markUnsyncedPending(false);
     fbSetStatus('ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
     catchUpFromServerIfMissed();
     render();
   }).catch(err=>{
     fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
-    if(attempt<4){ setTimeout(()=>pushJobChange(jobId, removedBoardPostId, attempt+1, retryKey), 800*attempt); return; }
+    if(attempt<4){ setTimeout(()=>pushJobChange(jobId, removedBoardPostId, attempt+1), 800*attempt); return; }
     fbPendingLocalWrite=false;
     markUnsyncedPending(true);
     fbSetStatus('ซิงค์งานไม่สำเร็จ: '+err.message, false);
     toast('บันทึกในเครื่องสำเร็จ แต่ซิงค์งานขึ้นคลาวด์ไม่สำเร็จ ('+err.message+')','err','fa-triangle-exclamation');
-    queueFailedRetry(retryKey, ()=>pushJobChange(jobId, removedBoardPostId, 1, retryKey));
   });
 }
 /* Generic scoped merge for plain array fields whose items are independent records identified by
@@ -1421,9 +1300,8 @@ function pushJobChange(jobId, removedBoardPostId, attempt, retryKey){
    exact same add/edit/delete operation against whatever is actually on the server right now,
    instead of overwriting the whole array (let alone the whole document) with a possibly-stale
    local copy. applyFn receives the server's current array for that field and returns the new one. */
-function pushListChange(fieldName, applyFn, attempt, retryKey){
+function pushListChange(fieldName, applyFn, attempt){
   attempt = attempt || 1;
-  retryKey = retryKey || uid('pushretry');
   if(!fbDB) return; // ไม่ได้เชื่อมคลาวด์ — บันทึกในเครื่องอย่างเดียวก็พอ
   fbPendingLocalWrite=true;
   fbInFlightWrites++;
@@ -1442,19 +1320,17 @@ function pushListChange(fieldName, applyFn, attempt, retryKey){
     fbPushRetryCount=0;
     DB[fieldName] = merged[fieldName];
     saveDBLocal();
-    clearFailedRetry(retryKey);
-    if(!fbFailedPushQueue.length) markUnsyncedPending(false);
+    markUnsyncedPending(false);
     fbSetStatus('ซิงค์ล่าสุด '+new Date().toLocaleTimeString('th-TH'), true);
     catchUpFromServerIfMissed();
     render();
   }).catch(err=>{
     fbInFlightWrites=Math.max(0,fbInFlightWrites-1);
-    if(attempt<4){ setTimeout(()=>pushListChange(fieldName, applyFn, attempt+1, retryKey), 800*attempt); return; }
+    if(attempt<4){ setTimeout(()=>pushListChange(fieldName, applyFn, attempt+1), 800*attempt); return; }
     fbPendingLocalWrite=false;
     markUnsyncedPending(true);
     fbSetStatus('ซิงค์ไม่สำเร็จ: '+err.message, false);
-    toast('บันทึกในเครื่องสำเร็จ แต่ซิงค์ขึ้นคลาวด์ไม่สำเร็จ ('+err.message+') — กด "ลองซิงค์อีกครั้ง" เพื่อลองใหม่','err','fa-triangle-exclamation');
-    queueFailedRetry(retryKey, ()=>pushListChange(fieldName, applyFn, 1, retryKey));
+    toast('บันทึกในเครื่องสำเร็จ แต่ซิงค์ขึ้นคลาวด์ไม่สำเร็จ ('+err.message+')','err','fa-triangle-exclamation');
   });
 }
 /* Persistent "there is unsynced data" flag, stored outside the app state so it survives a page
@@ -1477,15 +1353,9 @@ function updateUnsyncedBanner(){
 }
 function retryUnsyncedNow(){
   if(!fbDB){ toast('ยังไม่ได้เชื่อมต่อ Firebase อยู่ตอนนี้ กรุณาตั้งค่าการเชื่อมต่อในหน้าตั้งค่าก่อน','err','fa-triangle-exclamation'); return; }
-  if(fbFailedPushQueue.length){
-    const items=fbFailedPushQueue.slice();
-    toast('กำลังลองซิงค์ข้อมูลที่ค้างอยู่ '+items.length+' รายการ...','info','fa-cloud-arrow-up');
-    items.forEach(item=>item.retry());
-  } else {
-    fbPushRetryCount=0;
-    doFirebasePush();
-    toast('กำลังลองซิงค์ข้อมูลขึ้นคลาวด์อีกครั้ง...','info','fa-cloud-arrow-up');
-  }
+  fbPushRetryCount=0;
+  doFirebasePush();
+  toast('กำลังลองซิงค์ข้อมูลขึ้นคลาวด์อีกครั้ง...','info','fa-cloud-arrow-up');
 }
 function dismissUnsyncedBanner(){
   document.body.dataset.unsyncedDismissed='1';
@@ -1664,9 +1534,9 @@ document.addEventListener('click',(e)=>{
   const wrap=document.querySelector('.login-user-picker');
   if(wrap && !wrap.contains(e.target)) closeLoginUserDropdown();
 });
+const DISCORD_WEBHOOK_BOARD_URL='https://discord.com/api/webhooks/1540229816756867073/kwvCBYDzj2pXUNGdVAFGYc8qW-fiNYJHydeSh24ciYGjl3_PasVbNxqdenM_g3dV7lVY';
 function notifyDiscordBoardPost(post, isNew){
-  const webhookUrl=getDiscordWebhooks().board;
-  if(!webhookUrl) return;
+  if(!DISCORD_WEBHOOK_BOARD_URL) return;
   const embed={
     title: (isNew?'📌 ติดประกาศงานใหม่ · ':'✏️ แก้ไขประกาศงาน · ')+(post.tagNumber||''),
     color: isNew ? 0x1fa971 : 0x3b82f6,
@@ -1681,15 +1551,16 @@ function notifyDiscordBoardPost(post, isNew){
     footer:{text:'Saint Mungo JMS'},
     timestamp: new Date().toISOString()
   };
-  fetch(webhookUrl,{
+  fetch(DISCORD_WEBHOOK_BOARD_URL,{
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({embeds:[embed]})
   }).catch(err=>console.warn('Discord webhook (board) failed:',err));
 }
+const DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/1517900296850903200/giz6hHjd-Tb-ilRNQDJ2U3_0Csb1LJqJf0j8l9PF0W785zSMXpEVzefid3vZLrzMQkB5';
+const DISCORD_WEBHOOK_WARNING_URL='https://discord.com/api/webhooks/1518558427452801184/W8Lz3pAIPs648ReEKLNYtLCEc9fAP4npe1PiHXffv5W35TGRzqEtM43A7Bhff-Lcm4Oj';
 function sendDiscordWarningNotify(rec){
-  const webhookUrl=getDiscordWebhooks().warning;
-  if(!webhookUrl) return;
+  if(!DISCORD_WEBHOOK_WARNING_URL) return;
   const meta=warningHouseMeta(rec.house);
   const colorHex=parseInt(meta.color.replace('#',''),16);
   const embed={
@@ -1706,36 +1577,11 @@ function sendDiscordWarningNotify(rec){
     timestamp: new Date(rec.createdAt).toISOString()
   };
   if(rec.imageUrl) embed.image={url:rec.imageUrl};
-  fetch(webhookUrl,{
+  fetch(DISCORD_WEBHOOK_WARNING_URL,{
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({embeds:[embed]})
   }).catch(err=>console.warn('Discord webhook (warning) failed:',err));
-}
-function sendDiscordLeaveNotify(rec){
-  const webhookUrl=getDiscordWebhooks().leave;
-  if(!webhookUrl) return;
-  const emp=DB.employees.find(e=>e.id===rec.employeeId);
-  const isRest = rec.leaveType==='rest';
-  const embed={
-    title: isRest ? '🛌 บันทึกการพัก' : '📝 บันทึกการลา',
-    color: isRest ? 0x8b5cf6 : 0x3b82f6,
-    fields:[
-      {name:'👤 ชื่อ', value: emp?emp.name:'(ไม่พบพนักงาน)', inline:true},
-      {name:'💼 ตำแหน่ง', value: emp?emp.role:'-', inline:true},
-      {name:'📌 ประเภท', value: isRest?'พัก':'ลา', inline:true},
-      {name:'📅 วันที่เริ่ม', value: fmtDate(rec.dateFrom), inline:true},
-      {name:'📅 ถึงวันที่', value: fmtDate(rec.dateTo), inline:true},
-      {name:'📝 เหตุผล', value: rec.reason||'-', inline:false}
-    ],
-    footer:{text:'บันทึกโดย '+(STATE.currentUser?STATE.currentUser.name:'ไม่ทราบผู้ใช้')},
-    timestamp: new Date().toISOString()
-  };
-  fetch(webhookUrl,{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({embeds:[embed]})
-  }).catch(err=>console.warn('Discord webhook (leave) failed:',err));
 }
 function fmtThaiDateTime(ts){
   const d=new Date(ts);
@@ -1744,8 +1590,7 @@ function fmtThaiDateTime(ts){
   return date+' '+time;
 }
 function sendDiscordShiftNotify(kind, empName, empRole){
-  const webhookUrl=getDiscordWebhooks().shift;
-  if(!webhookUrl) return;
+  if(!DISCORD_WEBHOOK_URL) return;
   const isIn = kind==='in';
   const now=Date.now();
   const embed={
@@ -1758,7 +1603,7 @@ function sendDiscordShiftNotify(kind, empName, empRole){
     ],
     timestamp: new Date(now).toISOString()
   };
-  fetch(webhookUrl,{
+  fetch(DISCORD_WEBHOOK_URL,{
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({embeds:[embed]})
@@ -2496,7 +2341,6 @@ function openBoardModal(id){
         const copy=list.slice(); copy[i]=post; return copy;
       });
       toast('แก้ไขประกาศ "'+data.title+'" แล้ว','ok','fa-check'); notifyDiscordBoardPost(post, false); closeModal(); render();
-      showShiftPopup('✅ แก้ไขประกาศบนบอร์ดสำเร็จ');
     } else {
       data.id=uid('bp'); data.createdAt=todayStr(); data.tagNumber=generateBoardTag();
       DB.boardPosts.push(data);
@@ -2507,7 +2351,6 @@ function openBoardModal(id){
         return list.concat([data]);
       });
       toast('ติดประกาศงาน "'+data.title+'" แล้ว (เลขแท็ก '+data.tagNumber+')','ok','fa-thumbtack'); notifyDiscordBoardPost(data, true); closeModal(); render();
-      showShiftPopup('✅ ลงงานบนบอร์ดสำเร็จ');
     }
   };
 }
@@ -3998,10 +3841,7 @@ function openLeaveModal(){
     clearTimeout(fbPushTimer); fbPendingLocalWrite=false;
     pushListChange('leaveRecords', list=>list.find(x=>x.id===data.id) ? list : list.concat([data]));
     pushShiftChange(data.employeeId); // attendance ถูกจัดการโดยระบบ merge ของเข้าเวรโดยเฉพาะ ต้อง push แยกผ่านตรงนี้
-    sendDiscordLeaveNotify(data);
-    toast('บันทึกการลาสำเร็จ — อัปเดตเช็คเข้าเวรและแฟ้มสะสมผลงานแล้ว','ok','fa-check');
-    showShiftPopup(data.leaveType==='rest' ? '✅ บันทึกการพักสำเร็จ' : '✅ บันทึกการลาสำเร็จ');
-    closeModal(); render();
+    toast('บันทึกการลาสำเร็จ — อัปเดตเช็คเข้าเวรและแฟ้มสะสมผลงานแล้ว','ok','fa-check'); closeModal(); render();
   };
 }
 function deleteLeaveRecord(id){
@@ -4696,19 +4536,6 @@ function pageSettings(){
         <button class="btn btn-ghost btn-sm" id="btnDisconnectFirebase"><i class="fa-solid fa-circle-xmark"></i> ยกเลิกการเชื่อมต่อ</button>
       </div>
       <p id="fbStatus" style="font-size:12px;margin-top:10px;">${fbStatusHtml()}</p>
-    </div>
-    <div class="card side-block" style="grid-column:1/-1;">
-      <h4><i class="fa-solid fa-bell"></i> เว็บฮุก Discord (แจ้งเตือนอัตโนมัติ)</h4>
-      <p style="font-size:12px;color:var(--ink-soft);margin-bottom:12px;">กำหนด/แก้ไขลิงก์เว็บฮุก Discord ของแต่ละประเภทการแจ้งเตือนได้ที่นี่ เปลี่ยนได้ตลอดเวลาโดยไม่ต้องแก้โค้ด — ถ้าเว้นช่องไหนว่างไว้ ระบบจะไม่ส่งแจ้งเตือนประเภทนั้น</p>
-      <div class="form-row"><label><i class="fa-solid ${DISCORD_WEBHOOK_LABELS.job.icon}"></i> ${DISCORD_WEBHOOK_LABELS.job.label}</label><input type="text" id="webhookJobInput" value="${getDiscordWebhooks().job}" placeholder="https://discord.com/api/webhooks/..." autocomplete="off"></div>
-      <div class="form-row"><label><i class="fa-solid ${DISCORD_WEBHOOK_LABELS.board.icon}"></i> ${DISCORD_WEBHOOK_LABELS.board.label}</label><input type="text" id="webhookBoardInput" value="${getDiscordWebhooks().board}" placeholder="https://discord.com/api/webhooks/..." autocomplete="off"></div>
-      <div class="form-row"><label><i class="fa-solid ${DISCORD_WEBHOOK_LABELS.shift.icon}"></i> ${DISCORD_WEBHOOK_LABELS.shift.label}</label><input type="text" id="webhookShiftInput" value="${getDiscordWebhooks().shift}" placeholder="https://discord.com/api/webhooks/..." autocomplete="off"></div>
-      <div class="form-row"><label><i class="fa-solid ${DISCORD_WEBHOOK_LABELS.warning.icon}"></i> ${DISCORD_WEBHOOK_LABELS.warning.label}</label><input type="text" id="webhookWarningInput" value="${getDiscordWebhooks().warning}" placeholder="https://discord.com/api/webhooks/..." autocomplete="off"></div>
-      <div class="form-row"><label><i class="fa-solid ${DISCORD_WEBHOOK_LABELS.leave.icon}"></i> ${DISCORD_WEBHOOK_LABELS.leave.label}</label><input type="text" id="webhookLeaveInput" value="${getDiscordWebhooks().leave}" placeholder="https://discord.com/api/webhooks/..." autocomplete="off"></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
-        <button class="btn btn-primary btn-sm" id="btnSaveWebhooks"><i class="fa-solid fa-check"></i> บันทึกเว็บฮุกทั้งหมด</button>
-        <button class="btn btn-ghost btn-sm" id="btnResetWebhooks"><i class="fa-solid fa-rotate"></i> คืนค่าเริ่มต้น</button>
-      </div>
     </div>` : ''}
     <div class="card side-block">
       <h4><i class="fa-solid fa-hat-wizard"></i> โลโก้และธีมสี</h4>
@@ -4992,12 +4819,9 @@ function restoreFirebaseBackup(backupId){
       if(!data.hourAdjustments) data.hourAdjustments=[];
       if(!data.queue) data.queue=[];
       if(!data.warnings) data.warnings=[];
-      if(!data.discordWebhooks) data.discordWebhooks={};
-      Object.keys(DEFAULT_DISCORD_WEBHOOKS).forEach(k=>{ if(!data.discordWebhooks[k]) data.discordWebhooks[k]=DEFAULT_DISCORD_WEBHOOKS[k]; });
       if(!data.users || !data.users.length) data.users=defaultUsers();
       DB = data;
       ensureRolePermissions();
-      fbForceOverwrite=true;
       saveDB();
       toast('กู้คืนข้อมูลจาก Firebase เรียบร้อย','ok','fa-box-archive');
       logout();
@@ -5048,12 +4872,9 @@ function importBackupFile(file){
       if(!data.hourAdjustments) data.hourAdjustments=[];
       if(!data.queue) data.queue=[];
       if(!data.warnings) data.warnings=[];
-      if(!data.discordWebhooks) data.discordWebhooks={};
-      Object.keys(DEFAULT_DISCORD_WEBHOOKS).forEach(k=>{ if(!data.discordWebhooks[k]) data.discordWebhooks[k]=DEFAULT_DISCORD_WEBHOOKS[k]; });
       if(!data.users || !data.users.length) data.users=defaultUsers();
       DB = data;
       ensureRolePermissions();
-      fbForceOverwrite=true;
       saveDB();
       toast('กู้คืนข้อมูลจากไฟล์สำรองเรียบร้อย','ok','fa-box-archive');
       logout();
@@ -5179,25 +5000,6 @@ function attachPageEvents(){
     applyBrandTheme();
     toast('คืนค่าโลโก้/ธีมสีเริ่มต้นแล้ว','info','fa-rotate');
     render();
-  };
-  const btnSaveWebhooks=document.getElementById('btnSaveWebhooks');
-  if(btnSaveWebhooks) btnSaveWebhooks.onclick=()=>{
-    setDiscordWebhooks({
-      job: document.getElementById('webhookJobInput').value.trim(),
-      board: document.getElementById('webhookBoardInput').value.trim(),
-      shift: document.getElementById('webhookShiftInput').value.trim(),
-      warning: document.getElementById('webhookWarningInput').value.trim(),
-      leave: document.getElementById('webhookLeaveInput').value.trim()
-    });
-    toast('บันทึกเว็บฮุก Discord เรียบร้อย','ok','fa-check');
-  };
-  const btnResetWebhooks=document.getElementById('btnResetWebhooks');
-  if(btnResetWebhooks) btnResetWebhooks.onclick=()=>{
-    confirmDelete('ต้องการคืนค่าเว็บฮุก Discord ทั้งหมดกลับเป็นค่าเริ่มต้นของระบบหรือไม่?', ()=>{
-      setDiscordWebhooks({...DEFAULT_DISCORD_WEBHOOKS});
-      toast('คืนค่าเว็บฮุก Discord เริ่มต้นแล้ว','info','fa-rotate');
-      render();
-    });
   };
 }
 
